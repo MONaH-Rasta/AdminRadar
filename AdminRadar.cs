@@ -10,27 +10,14 @@ using Rust;
 using UnityEngine;
 
 /*
-    Performance improvements:
-        Removed LINQ usage completely
-        Replaced most string concatenation with StringBuilder
-        Improved performance of FillCache. Credits @hoppel
-
-    Added setting Second Command. Set blank to disable. @ratomas79
-    Fixed rare NRE in FillCache by stopping the coroutine on unload
-    Removed redunancy in FillCache
-    Removed Player Movement Tracker. Player Tracker plugin is available.
-    Removed OnPlayerSleepEnded hook
-
-    Added new commands for GUI editing:
-        /radar setanchormin 0.667 0.020 - adjust the min and refresh UI with changes
-        /radar setanchormax 0.810 0.148 - adjust the max and refresh UI with changes
-        /radar anchors_save - save changes to config
-        /radar anchors_reset - reset anchors to defaults in config and in game
+    Fixed green X drawings in GroupLimitHightlighting
+    Fixed TC / TCArrows argument
+    Please read 4.8.0 notes
 */
 
 namespace Oxide.Plugins
 {
-    [Info("Admin Radar", "nivex", "4.8.1")]
+    [Info("Admin Radar", "nivex", "4.8.2")]
     [Description("Radar tool for Admins and Developers.")]
     class AdminRadar : RustPlugin
     {
@@ -974,21 +961,14 @@ namespace Oxide.Plugins
 
                     var groupedPlayers = new Dictionary<int, List<BasePlayer>>();
                     var players = new List<BasePlayer>();
-                    var all = new List<BasePlayer>();
                     bool foundPlayer = false;
-                    int index = 0;
 
-                    foreach (var target in distantPlayers)
+                    foreach (var target in distantPlayers.ToArray())
                     {
                         players.Clear();
 
                         foreach (var player in distantPlayers)
                         {
-                            if (all.Contains(player))
-                            {
-                                continue;
-                            }
-
                             if (Vector3.Distance(player.transform.position, target.transform.position) < groupRange)
                             {
                                 foundPlayer = false;
@@ -1002,13 +982,8 @@ namespace Oxide.Plugins
                                     }
                                 }
 
-                                if (!foundPlayer)
+                                if (!foundPlayer && !players.Contains(player))
                                 {
-                                    if (!all.Contains(player))
-                                    {
-                                        all.Add(player);
-                                    }
-
                                     players.Add(player);
                                 }
                             }
@@ -1016,14 +991,15 @@ namespace Oxide.Plugins
                         
                         if (players.Count >= groupLimit)
                         {
+                            int index = 0;
+
                             while (groupedPlayers.ContainsKey(index))
                                 index++;
 
                             groupedPlayers.Add(index, players);
+                            distantPlayers.RemoveAll(x => players.Contains(x));
                         }
                     }
-
-                    distantPlayers.RemoveAll(x => all.Contains(x));
 
                     foreach (var target in distantPlayers)
                     {
@@ -1668,7 +1644,7 @@ namespace Oxide.Plugins
 
             foreach (var player in BasePlayer.activePlayerList)
             {
-                if (player != null && player.IsConnected && player.GetComponent<Radar>() == null && permission.UserHasPermission(player.UserIDString, permAllowed))
+                if (player != null && player.IsConnected && permission.UserHasPermission(player.UserIDString, permAllowed))
                 {
                     cmdESP(player, "radar", new string[0]);
                 }
@@ -1909,7 +1885,7 @@ namespace Oxide.Plugins
             }
         }
 
-        private WaitForEndOfFrame _cachedWaitForEndOfFrame = new WaitForEndOfFrame(); // 4.7.4 Credits @hoppel
+        private WaitForEndOfFrame _cachedWaitForEndOfFrame = new WaitForEndOfFrame(); // 4.8.0 Credits @hoppel
         private System.Collections.IEnumerator FillCache()
         {
             var tick = DateTime.Now;
@@ -2528,9 +2504,12 @@ namespace Oxide.Plugins
         {
             foreach(string Arg in args)
             {
-                if (equalTo && Arg.Equals(arg))
+                if (equalTo)
                 {
-                    return true;
+                    if (Arg.Equals(arg))
+                    {
+                        return true;
+                    }
                 }
                 else if (Arg.Contains(arg) || arg.Contains(Arg))
                 {

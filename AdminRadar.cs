@@ -10,9 +10,15 @@ using Oxide.Game.Rust.Cui;
 using UnityEngine;
 using Random = UnityEngine.Random;
 
+// Fixed NullReferenceException in HasAccess @maxaki
+// Reduced map marker radius size due to map update @darkzen
+// Removed CSS from player names @casualrussian
+// Added config option 'Color-Hex Codes > Player Arrows > #f000000' (black) @ForGx3
+// adminradar.allowed now allows full radar functionality without requiring FauxAdmin. This temporarily grants the player the admin flag. USE AT YOUR OWN RISK. @Covfefe
+
 namespace Oxide.Plugins
 {
-    [Info("Admin Radar", "nivex", "4.5.4")]
+    [Info("Admin Radar", "nivex", "4.5.5")]
     [Description("Radar tool for Admins and Developers.")]
     public class AdminRadar : RustPlugin
     {
@@ -165,7 +171,7 @@ namespace Oxide.Plugins
                     generic.alpha = 1f;
                     generic.color1 = color1;
                     generic.color2 = entity.IsNpc ? defaultNpcColor : privilegeColor2;
-                    generic.radius = 2f;
+                    generic.radius = 0.1f;
                     generic.enabled = true;
                     generic.Spawn();
                     generic.SendUpdate();
@@ -211,7 +217,7 @@ namespace Oxide.Plugins
                     generic.alpha = 1f;
                     generic.color1 = privilegeColor1;
                     generic.color2 = privilegeColor2;
-                    generic.radius = 2f;
+                    generic.radius = 0.1f;
                     generic.enabled = true;
                     generic.Spawn();
                     generic.SendUpdate();
@@ -509,6 +515,7 @@ namespace Oxide.Plugins
             private void DoRadar()
             {
                 var tick = DateTime.Now;
+                bool isAdmin = player.IsAdmin;
 
                 try
                 {
@@ -519,6 +526,12 @@ namespace Oxide.Plugins
                     }
 
                     drawnObjects = 0;
+
+                    if (!isAdmin && ins.permission.UserHasPermission(player.UserIDString, permName))
+                    {
+                        player.SetPlayerFlag(BasePlayer.PlayerFlags.IsAdmin, true);
+                        player.SendNetworkUpdateImmediate();
+                    }
 
                     if (!SetSource())
                         return;
@@ -699,6 +712,12 @@ namespace Oxide.Plugins
                 }
                 finally
                 {
+                    if (!isAdmin && player.HasPlayerFlag(BasePlayer.PlayerFlags.IsAdmin))
+                    {
+                        player.SetPlayerFlag(BasePlayer.PlayerFlags.IsAdmin, false);
+                        player.SendNetworkUpdateImmediate();
+                    }
+
                     if (!LatencyAccepted(tick))
                     {
                         double ms = (DateTime.Now - tick).TotalMilliseconds;
@@ -784,8 +803,8 @@ namespace Oxide.Plugins
                         string health = showHT && target.metabolism != null ? string.Format("{0} <color=orange>{1}</color>:<color=lightblue>{2}</color>", Math.Floor(target.health), target.metabolism.calories.value.ToString("#0"), target.metabolism.hydration.value.ToString("#0")) : Math.Floor(target.health).ToString("#0");
 
                         if (storedData.Visions.Contains(player.UserIDString)) DrawVision(player, target, invokeTime);
-                        if (drawArrows) player.SendConsoleCommand("ddraw.arrow", invokeTime + flickerDelay, color, target.transform.position + new Vector3(0f, target.transform.position.y + 10), target.transform.position, 1);
-                        if (drawText) player.SendConsoleCommand("ddraw.text", invokeTime + flickerDelay, color, target.transform.position + new Vector3(0f, 2f, 0f), string.Format("{0} <color={1}>{2}</color> <color={3}>{4}</color>{5} {6}", target.displayName ?? target.userID.ToString(), healthCC, health, distCC, currDistance, vanished, extText));
+                        if (drawArrows) player.SendConsoleCommand("ddraw.arrow", invokeTime + flickerDelay, __(colorDrawArrows), target.transform.position + new Vector3(0f, target.transform.position.y + 10), target.transform.position, 1);
+                        if (drawText) player.SendConsoleCommand("ddraw.text", invokeTime + flickerDelay, color, target.transform.position + new Vector3(0f, 2f, 0f), string.Format("{0} <color={1}>{2}</color> <color={3}>{4}</color>{5} {6}", ins.RemoveFormatting(target.displayName) ?? target.userID.ToString(), healthCC, health, distCC, currDistance, vanished, extText));
                         if (drawBox) player.SendConsoleCommand("ddraw.box", invokeTime + flickerDelay, color, target.transform.position + new Vector3(0f, 1f, 0f), target.GetHeight(target.modelState.ducked));
                         if (voices.ContainsKey(target.userID) && Vector3.Distance(target.transform.position, player.transform.position) <= voiceDistance)
                         {
@@ -823,8 +842,8 @@ namespace Oxide.Plugins
                         string health = showHT && sleeper.metabolism != null ? string.Format("{0} <color=orange>{1}</color>:<color=lightblue>{2}</color>", Math.Floor(sleeper.health), sleeper.metabolism.calories.value.ToString("#0"), sleeper.metabolism.hydration.value.ToString("#0")) : Math.Floor(sleeper.health).ToString("#0");
                         var color = __(sleeper.IsAlive() ? sleeperCC : sleeperDeadCC);
 
-                        if (drawArrows) player.SendConsoleCommand("ddraw.arrow", invokeTime + flickerDelay, color, sleeper.transform.position + new Vector3(0f, sleeper.transform.position.y + 10), sleeper.transform.position, 1);
-                        if (drawText) player.SendConsoleCommand("ddraw.text", invokeTime + flickerDelay, color, sleeper.transform.position, string.Format("{0} <color={1}>{2}</color> <color={3}>{4}</color>", sleeper.displayName ?? sleeper.userID.ToString(), healthCC, health, distCC, currDistance));
+                        if (drawArrows) player.SendConsoleCommand("ddraw.arrow", invokeTime + flickerDelay, __(colorDrawArrows), sleeper.transform.position + new Vector3(0f, sleeper.transform.position.y + 10), sleeper.transform.position, 1);
+                        if (drawText) player.SendConsoleCommand("ddraw.text", invokeTime + flickerDelay, color, sleeper.transform.position, string.Format("{0} <color={1}>{2}</color> <color={3}>{4}</color>", ins.RemoveFormatting(sleeper.displayName) ?? sleeper.userID.ToString(), healthCC, health, distCC, currDistance));
                         if (drawX) player.SendConsoleCommand("ddraw.text", invokeTime + flickerDelay, color, sleeper.transform.position + new Vector3(0f, 1f, 0f), "X");
                         else if (drawBox) player.SendConsoleCommand("ddraw.box", invokeTime + flickerDelay, color, sleeper.transform.position, GetScale(currDistance));
                     }
@@ -1477,6 +1496,14 @@ namespace Oxide.Plugins
             Subscribe(nameof(OnEntityDeath));
             Subscribe(nameof(OnEntityKill));
             Subscribe(nameof(OnEntitySpawned));
+
+            foreach (var player in BasePlayer.activePlayerList)
+            {
+                if (player != null && player.IsConnected && player.GetComponent<Radar>() == null && permission.UserHasPermission(player.UserIDString, permName))
+                {
+                    cmdESP(player, "radar", new string[0]);
+                }
+            }
         }
 
         private void OnCupboardAuthorize(BuildingPrivlidge privilege, BasePlayer player)
@@ -1574,6 +1601,11 @@ namespace Oxide.Plugins
             if (player.IsAdmin || HasAccess(player))
             {
                 accessList.Add(player);
+            }
+
+            if (player != null && player.IsConnected && player.GetComponent<Radar>() == null && permission.UserHasPermission(player.UserIDString, permName))
+            {
+                cmdESP(player, "radar", new string[0]);
             }
         }
 
@@ -2177,13 +2209,16 @@ namespace Oxide.Plugins
             if (player == null)
                 return false;
 
+            if (permission.UserHasPermission(player.UserIDString, permName))
+                return true;
+
             if (DeveloperList.Contains(player.userID))
                 return true;
 
             if (authorized.Count > 0)
                 return authorized.Contains(player.UserIDString);
 
-            if (player.net.connection.authLevel >= authLevel)
+            if (player.IsConnected && player.net.connection.authLevel >= authLevel)
                 return true;
 
             if (permission.UserHasPermission(player.UserIDString, "fauxadmin.allowed") && permission.UserHasPermission(player.UserIDString, permName) && player.IsDeveloper)
@@ -2546,6 +2581,7 @@ namespace Oxide.Plugins
         private static bool drawText = true;
         private static bool drawBox;
         private static bool drawArrows;
+        private static string colorDrawArrows;
         private static bool drawX;
         private static int authLevel;
         private static float defaultInvokeTime;
@@ -2628,7 +2664,7 @@ namespace Oxide.Plugins
         private string uiColorOff;
 
         private static string szChatCommand;
-        private static List<object> authorized;
+        private static List<object> authorized = new List<object>();
         private static List<string> itemExceptions = new List<string>();
         private string anchorMin;
 
@@ -2803,7 +2839,6 @@ namespace Oxide.Plugins
         private void LoadVariables()
         {
             barebonesMode = Convert.ToBoolean(GetConfig("Settings", "Barebones Performance Mode", false));
-
             authorized = GetConfig("Settings", "Restrict Access To Steam64 IDs", new List<object>()) as List<object>;
 
             foreach (var auth in authorized.ToList())
@@ -2873,6 +2908,7 @@ namespace Oxide.Plugins
             trackDrawTime = Convert.ToSingle(GetConfig("Player Movement Tracker", "Draw Time", 60f));
             playerOverlapDistance = Convert.ToSingle(GetConfig("Player Movement Tracker", "Overlap Reduction Distance", 5f));
 
+            colorDrawArrows = Convert.ToString(GetConfig("Color-Hex Codes", "Player Arrows", "#000000"));
             distCC = Convert.ToString(GetConfig("Color-Hex Codes", "Distance", "#ffa500"));
             heliCC = Convert.ToString(GetConfig("Color-Hex Codes", "Helicopters", "#ff00ff"));
             bradleyCC = Convert.ToString(GetConfig("Color-Hex Codes", "Bradley", "#ff00ff"));

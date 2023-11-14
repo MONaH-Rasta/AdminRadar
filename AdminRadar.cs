@@ -17,13 +17,20 @@ using Rust;
 using UnityEngine;
 
 /*
-Clans and teams now update when players create a new clan or team    
-Fixed players being added to NPC list when they respawn by using a delay to check their userID
+Added `Show Npc Player Target` (false)
+Added `Color Hex Codes > Online Player (Underground)` (FFFFFF)
+Added `Color Hex Codes > Online Player (Flying)` (FFFFFF)
+Added `Unique Clan/Team Color Applies To Entire Player Text` (false) @Flammable
+Added command `/radar buildings` - draws the location of buildings without a TC for 3 minutes
+Visions will no longer be drawn if the radar user is beyond 150 meters from the player
 */
+
+//cache deployables
+//https://umod.org/community/admin-radar/32562-show-if-person-near-tc
 
 namespace Oxide.Plugins
 {
-    [Info("Admin Radar", "nivex", "5.1.2")]
+    [Info("Admin Radar", "nivex", "5.1.3")]
     [Description("Radar tool for Admins and Developers.")]
     class AdminRadar : RustPlugin
     {
@@ -140,33 +147,6 @@ namespace Oxide.Plugins
             public readonly List<SupplyDrop> SupplyDrops = new List<SupplyDrop>();
             public readonly List<AutoTurret> Turrets = new List<AutoTurret>();
             public readonly List<Zombie> Zombies = new List<Zombie>();
-
-            public void Clear()
-            {
-                Animals.Clear();
-                CargoPlanes.Clear();
-                Backpacks.Clear();
-                Bags.Clear();
-                Boats.Clear();
-                BradleyAPCs.Clear();
-                CargoShips.Clear();
-                Cars.Clear();
-                CCTV.Clear();
-                CH47.Clear();
-                Cupboards.Clear();
-                Collectibles.Clear();
-                Containers.Clear();
-                Corpses.Clear();
-                Helicopters.Clear();
-                MiniCopter.Clear();
-                NPCPlayers.Clear();
-                Ores.Clear();
-                RHIB.Clear();
-                RidableHorse.Clear();
-                SupplyDrops.Clear();
-                Turrets.Clear();
-                Zombies.Clear();
-            }
         }
 
         private class StoredData
@@ -263,28 +243,28 @@ namespace Oxide.Plugins
 
             object fields = new[]
             {
-                new 
+                new
                 {
-                    name = _embedMessagePlayer, 
-                    value = steam, 
+                    name = _embedMessagePlayer,
+                    value = steam,
                     inline = true
                 },
-                new 
+                new
                 {
-                    name = _embedMessageMessage, 
-                    value = text, 
+                    name = _embedMessageMessage,
+                    value = text,
                     inline = false
                 },
-                new 
+                new
                 {
-                    name = _embedMessageServer, 
-                    value = server, 
+                    name = _embedMessageServer,
+                    value = server,
                     inline = false
                 },
-                new 
+                new
                 {
-                    name = _embedMessageLocation, 
-                    value = grid, 
+                    name = _embedMessageLocation,
+                    value = grid,
                     inline = false
                 }
             };
@@ -361,7 +341,7 @@ namespace Oxide.Plugins
             private Vector3 lastPosition;
             private bool canBypassOverride;
             private bool hasPermAllowed;
-
+            
             private void Awake()
             {
                 removePlayers = new List<BasePlayer>();
@@ -574,6 +554,7 @@ namespace Oxide.Plugins
                     }
 
                     ShowSleepers();
+                    //Draw();
 
                     if (!isAdmin && player.HasPlayerFlag(BasePlayer.PlayerFlags.IsAdmin))
                     {
@@ -735,6 +716,7 @@ namespace Oxide.Plugins
                     }
 
                     ShowCollectables();
+                    //Draw();
 
                     if (!isAdmin && player.HasPlayerFlag(BasePlayer.PlayerFlags.IsAdmin))
                     {
@@ -1074,26 +1056,118 @@ namespace Oxide.Plugins
                 {
                     DrawArrow(Color.red, target.eyes.position + new Vector3(0f, 0.115f, 0f), hit.point, 0.15f, true);
                 }
+                //else DrawArrow(Color.black, target.eyes.position + target.eyes.HeadForward(), target.eyes.position + target.eyes.HeadForward() * 30f, 0.15f, true);
             }
 
-            private void DrawArrow(Color color, Vector3 from, Vector3 to, float size, bool bypass)
+            private class Texts
             {
-                if (drawArrows || bypass) player.SendConsoleCommand("ddraw.arrow", invokeTime + flickerDelay, color, from, to, size);
+                public Color color;
+                public Vector3 position;
+                public string text;
+            }
+
+            private class Arrows
+            {
+                public Color color;
+                public Vector3 from;
+                public Vector3 to;
+                public float size;
+            }
+
+            private class Boxes
+            {
+                public Color color;
+                public Vector3 position;
+                public float size;
+            }
+
+            private List<Texts> texts = new List<Texts>();
+            private List<Arrows> arrows = new List<Arrows>();
+            private List<Boxes> boxes = new List<Boxes>();
+
+            private void DrawArrow(Color color, Vector3 from, Vector3 to, float size, bool @override)
+            {
+                /*if (drawArrows || @override)
+                {
+                    arrows.Add(new Arrows
+                    {
+                        color = color,
+                        from = from,
+                        to = to,
+                        size = size
+                    });
+                }*/
+
+                if (drawArrows || @override) player.SendConsoleCommand("ddraw.arrow", invokeTime + flickerDelay, color, from, to, size);
             }
 
             private void DrawPlayerText(Color color, Vector3 position, string prefix, string text, bool @override = false)
             {
+                /*if (drawText || @override)
+                {
+                    texts.Add(new Texts
+                    {
+                        color = color,
+                        position = position,
+                        text = $"<size={playerPrefixSize}>{prefix}</size> <size={playerTextSize}>{text}</size>"
+                    });
+                }*/
+
                 if (drawText || @override) player.SendConsoleCommand("ddraw.text", invokeTime + flickerDelay, color, position, $"<size={playerPrefixSize}>{prefix}</size> <size={playerTextSize}>{text}</size>");
             }
 
             private void DrawText(Color color, Vector3 position, string prefix, string text, bool @override = false)
             {
+                /*if (drawText || @override)
+                {
+                    texts.Add(new Texts
+                    {
+                        color = color,
+                        position = position,
+                        text = $"<size={prefixSize}>{prefix}</size> <size={textSize}>{text}</size>"
+                    });
+                }*/
+
                 if (drawText || @override) player.SendConsoleCommand("ddraw.text", invokeTime + flickerDelay, color, position, $"<size={prefixSize}>{prefix}</size> <size={textSize}>{text}</size>");
             }
 
             private void DrawBox(Color color, Vector3 position, float size, bool @override = false)
             {
+                /*if (drawBox || @override)
+                {
+                    boxes.Add(new Boxes
+                    {
+                        color = color,
+                        position = position,
+                        size = size
+                    });
+                }*/
+
                 if (drawBox || @override) player.SendConsoleCommand("ddraw.box", invokeTime + flickerDelay, color, position, size);
+            }
+
+            private void Draw()
+            {
+                float time = invokeTime + flickerDelay;
+
+                foreach (var text in texts)
+                {
+                    player.SendConsoleCommand("ddraw.text", time, text.color, text.position, text.text);
+                }
+
+                foreach (var arrow in arrows)
+                {
+                    player.SendConsoleCommand("ddraw.arrow", time, arrow.color, arrow.from, arrow.to, arrow.size);
+                }
+
+                foreach (var box in boxes)
+                {
+                    player.SendConsoleCommand("ddraw.box", time, box.color, box.position, box.size);
+                }
+
+                texts.Clear();
+                arrows.Clear();
+                boxes.Clear();
             }
 
             private int ShowActive()
@@ -1104,18 +1178,24 @@ namespace Oxide.Plugins
                 entityType = EntityType.Active;
                 Color color;
 
+                List<ulong> list;
+                if (!trackers.TryGetValue(player, out list))
+                {
+                    list = new List<ulong>();
+                }
+
                 try
                 {
                     foreach (var target in BasePlayer.activePlayerList)
                     {
-                        if (target == null || target.transform == null || !target.IsConnected || trackers.Contains(target.userID))
+                        if (target == null || target.transform == null || !target.IsConnected || list.Contains(target.userID))
                         {
                             continue;
                         }
 
                         currDistance = (target.transform.position - source.transform.position).magnitude;
 
-                        if (player == target || currDistance > maxDistance)
+                        if (player.userID == target.userID || currDistance > maxDistance)
                         {
                             continue;
                         }
@@ -1125,8 +1205,11 @@ namespace Oxide.Plugins
                             continue;
                         }
 
-                        color = __(target.IsAlive() ? activeCC : activeDeadCC);
-                        
+                        var isFlying = !target.IsOnGround() || target.IsFlying;
+                        var isUnderground = !isFlying && target.transform.position.y + 1f < TerrainMeta.HeightMap.GetHeight(target.transform.position);
+
+                        color = __(isFlying ? activeFlyingCC : isUnderground ? activeUndergroundCC : target.IsAlive() ? activeCC : activeDeadCC);
+
                         if ((target.IsAdmin || ins.permission.UserHasPermission(target.UserIDString, "fauxadmin.allowed")) && canBypassOverride)
                         {
                             color = Color.magenta;
@@ -1157,9 +1240,6 @@ namespace Oxide.Plugins
                                 }
                             }
 
-                            string vanished = ins.Vanish != null && ins.Vanish.Call<bool>("IsInvisible", target) ? "<color=#FF00FF>V</color>" : string.Empty;
-                            string health = showHT && target.metabolism != null ? string.Format("{0} <color=#FFA500>{1}</color>:<color=#FFADD8E6>{2}</color>", Math.Floor(target.health), target.metabolism.calories.value.ToString("#0"), target.metabolism.hydration.value.ToString("#0")) : Math.Floor(target.health).ToString("#0");
-
                             if (averagePingInterval > 0)
                             {
                                 _cachedStringBuilder.Append(" ");
@@ -1170,18 +1250,42 @@ namespace Oxide.Plugins
                             string clanCC;
                             if (ins._clanColors.TryGetValue(GetClanOf(target.userID), out clanCC))
                             {
-                                clanCC = $" <color={clanCC}>C</color>";
+                                if (!ctNameColor)
+                                {
+                                    clanCC = $" <color={clanCC}>C</color>";
+                                }
                             }
+                            else clanCC = null;
 
                             string teamCC;
                             if (ins._teamColors.TryGetValue(target.currentTeam, out teamCC))
                             {
-                                teamCC = $"<color={teamCC}>T</color>";
+                                if (!ctNameColor)
+                                {
+                                    teamCC = $"<color={teamCC}>T</color>";
+                                }
                             }
+                            else teamCC = null;
 
-                            if (ins.storedData.Visions.Contains(player.UserIDString)) DrawVision(target);
+                            string cc = clanCC ?? teamCC;
+
+                            if (ins.storedData.Visions.Contains(player.UserIDString) && currDistance <= 150f) DrawVision(target);
                             DrawArrow(__(colorDrawArrows), target.transform.position + new Vector3(0f, target.transform.position.y + 10), target.transform.position, 1, false);
-                            DrawPlayerText(color, target.transform.position + new Vector3(0f, 2f, 0f), ins.RemoveFormatting(target.displayName) ?? target.userID.ToString(), string.Format("<color={0}>{1}</color> <color={2}>{3}</color>{4} {5}{6}{7}", healthCC, health, distCC, currDistance.ToString("0"), vanished, _cachedStringBuilder.ToString(), clanCC, teamCC));
+                            if (ctNameColor && !string.IsNullOrEmpty(cc))
+                            {
+                                string displayName = string.Format("<color={0}>{1}</color>", cc, ins.RemoveFormatting(target.displayName));
+                                string vanished = ins.Vanish != null && Convert.ToBoolean(ins.Vanish?.Call("IsInvisible", target)) ? "V" : string.Empty;
+                                string health = showHT && target.metabolism != null ? string.Format("{0} {1}:{2}", Math.Floor(target.health), target.metabolism.calories.value.ToString("#0"), target.metabolism.hydration.value.ToString("#0")) : Math.Floor(target.health).ToString("#0");
+
+                                DrawPlayerText(color, target.transform.position + new Vector3(0f, 2f, 0f), displayName, $"<color={cc}>{health} {currDistance:0.0}{vanished} {_cachedStringBuilder}</color>");
+                            }
+                            else
+                            {
+                                string vanished = ins.Vanish != null && Convert.ToBoolean(ins.Vanish?.Call("IsInvisible", target)) ? "<color=#FF00FF>V</color>" : string.Empty;
+                                string health = showHT && target.metabolism != null ? string.Format("{0} <color=#FFA500>{1}</color>:<color=#FFADD8E6>{2}</color>", Math.Floor(target.health), target.metabolism.calories.value.ToString("#0"), target.metabolism.hydration.value.ToString("#0")) : Math.Floor(target.health).ToString("#0");
+                                
+                                DrawPlayerText(color, target.transform.position + new Vector3(0f, 2f, 0f), ins.RemoveFormatting(target.displayName), string.Format("<color={0}>{1}</color> <color={2}>{3}</color>{4} {5}{6}{7}", healthCC, health, distCC, currDistance.ToString("0"), vanished, _cachedStringBuilder.ToString(), clanCC, teamCC));
+                            }
                             DrawBox(color, target.transform.position + new Vector3(0f, 1f, 0f), target.GetHeight(target.modelState.ducked));
                             if (ins.voices.ContainsKey(target.userID) && (target.transform.position - player.transform.position).magnitude <= voiceDistance)
                             {
@@ -1213,42 +1317,67 @@ namespace Oxide.Plugins
                 entityType = EntityType.Sleepers;
                 Color color;
 
+                List<ulong> list;
+                if (!trackers.TryGetValue(player, out list))
+                {
+                    list = new List<ulong>();
+                }
+
                 try
                 {
-                    foreach (var sleeper in BasePlayer.sleepingPlayerList)
+                    foreach (var target in BasePlayer.sleepingPlayerList)
                     {
-                        if (sleeper == null || sleeper.transform == null || trackers.Contains(sleeper.userID))
+                        if (target == null || target.transform == null || list.Contains(target.userID))
                             continue;
 
-                        currDistance = (sleeper.transform.position - source.transform.position).magnitude;
+                        currDistance = (target.transform.position - source.transform.position).magnitude;
 
                         if (currDistance > maxDistance)
                             continue;
 
                         if (currDistance < playerDistance)
                         {
-                            string health = showHT && sleeper.metabolism != null ? string.Format("{0} <color=#FFA500>{1}</color>:<color=#FFADD8E6>{2}</color>", Math.Floor(sleeper.health), sleeper.metabolism.calories.value.ToString("#0"), sleeper.metabolism.hydration.value.ToString("#0")) : Math.Floor(sleeper.health).ToString("#0");
-                            color = __(sleeper.IsAlive() ? sleeperCC : sleeperDeadCC);
+                            color = __(target.IsAlive() ? sleeperCC : sleeperDeadCC);
                             string teamCC;
 
                             string clanCC;
-                            if (ins._clanColors.TryGetValue(GetClanOf(sleeper.userID), out clanCC))
+                            if (ins._clanColors.TryGetValue(GetClanOf(target.userID), out clanCC))
                             {
-                                clanCC = $" <color={clanCC}>C</color>";
+                                if (!ctNameColor)
+                                {
+                                    clanCC = $" <color={clanCC}>C</color>";
+                                }
                             }
 
-                            if (ins._teamColors.TryGetValue(sleeper.currentTeam, out teamCC))
+                            if (ins._teamColors.TryGetValue(target.currentTeam, out teamCC))
                             {
-                                teamCC = $"<color={teamCC}>T</color>";
+                                if (!ctNameColor)
+                                {
+                                    teamCC = $"<color={teamCC}>T</color>";
+                                }
                             }
-                            
-                            DrawArrow(__(colorDrawArrows), sleeper.transform.position + new Vector3(0f, sleeper.transform.position.y + 10), sleeper.transform.position, 1, false);
-                            DrawPlayerText(color, sleeper.transform.position, ins.RemoveFormatting(sleeper.displayName) ?? sleeper.userID.ToString(), string.Format("<color={0}>{1}</color> <color={2}>{3}</color>{4}{5}", healthCC, health, distCC, currDistance.ToString("0"), clanCC, teamCC));
-                            DrawPlayerText(color, sleeper.transform.position + new Vector3(0f, 1f, 0f), "X", string.Empty, drawX);
-                            if (!drawX && drawBox) DrawBox(color, sleeper.transform.position, GetScale(currDistance));
-                            ShowCupboardArrows(sleeper, EntityType.Sleepers);
+
+                            string cc = clanCC ?? teamCC;
+
+                            DrawArrow(__(colorDrawArrows), target.transform.position + new Vector3(0f, target.transform.position.y + 10), target.transform.position, 1, false);
+                            if (ctNameColor && !string.IsNullOrEmpty(cc))
+                            {
+                                string displayName = string.Format("<color={0}>{1}</color>", cc, ins.RemoveFormatting(target.displayName));
+                                string health = showHT && target.metabolism != null ? string.Format("{0} {1}:{2}", Math.Floor(target.health), target.metabolism.calories.value.ToString("#0"), target.metabolism.hydration.value.ToString("#0")) : Math.Floor(target.health).ToString("#0");
+
+                                DrawPlayerText(color, target.transform.position + new Vector3(0f, 2f, 0f), displayName, $"<color={cc}>{health} {currDistance:0.0}</color>");
+                            }
+                            else
+                            {
+                                string health = showHT && target.metabolism != null ? string.Format("{0} <color=#FFA500>{1}</color>:<color=#FFADD8E6>{2}</color>", Math.Floor(target.health), target.metabolism.calories.value.ToString("#0"), target.metabolism.hydration.value.ToString("#0")) : Math.Floor(target.health).ToString("#0");
+
+                                DrawPlayerText(color, target.transform.position, ins.RemoveFormatting(target.displayName) ?? target.userID.ToString(), string.Format("<color={0}>{1}</color> <color={2}>{3}</color>{4}{5}", healthCC, health, distCC, currDistance.ToString("0"), clanCC, teamCC));
+                            }
+                            DrawPlayerText(color, target.transform.position + new Vector3(0f, 1f, 0f), "X", string.Empty, drawX);
+                            if (!drawX && drawBox) DrawBox(color, target.transform.position, GetScale(currDistance));
+                            ShowCupboardArrows(target, EntityType.Sleepers);
                         }
-                        else DrawBox(Color.cyan, sleeper.transform.position + new Vector3(0f, 1f, 0f), 5f, true);
+                        else DrawBox(Color.cyan, target.transform.position + new Vector3(0f, 1f, 0f), 5f, true);
 
                         checks++;
                     }
@@ -1461,7 +1590,7 @@ namespace Oxide.Plugins
                             tcs.Remove(tc);
                             continue;
                         }
-                        
+
                         currDistance = (tc.transform.position - source.transform.position).magnitude;
 
                         if (currDistance < tcDistance && currDistance < maxDistance)
@@ -1569,7 +1698,7 @@ namespace Oxide.Plugins
                                 continue;
 
                             string text = showAirdropContents && drop.inventory.itemList.Count > 0 ? GetContents(drop.inventory.itemList) : string.Format("({0}) ", drop.inventory.itemList.Count);
-                            
+
                             DrawText(__(airdropCC), drop.transform.position + new Vector3(0f, 0.5f, 0f), ins._(drop.ShortPrefabName), string.Format("<color={0}>{1}</color><color={2}>{3}</color>", lootCC, text, distCC, currDistance.ToString("0")));
                             DrawBox(__(airdropCC), drop.transform.position + new Vector3(0f, 0.5f, 0f), GetScale(currDistance));
                             checks++;
@@ -1610,7 +1739,7 @@ namespace Oxide.Plugins
                         }
 
                         string colorHex = container is LockedByEntCrate || container is VendingMachine ? heliCC : isBox ? boxCC : isLoot ? lootCC : stashCC;
-                        
+
                         if (ins.storedData.OnlineBoxes.Contains(player.UserIDString) && container.OwnerID.IsSteamId() && (container.name.Contains("box") || container.name.Contains("coffin")))
                         {
                             var owner = BasePlayer.FindByID(container.OwnerID);
@@ -1808,7 +1937,21 @@ namespace Oxide.Plugins
                                 displayName = target.displayName;
                             }
                             else displayName = displayName = target.ShortPrefabName == "scarecrow" ? ins.msg("scarecrow", id) : target.PrefabName.Contains("scientist") ? ins.msg("scientist", id) : target is NPCMurderer ? ins.msg("murderer", id) : ins.msg("npc", id);
-                            
+
+                            if (drawTargetsVictim)
+                            {
+                                var victim = GetVictim(target);
+
+                                if (!string.IsNullOrEmpty(victim?.displayName))
+                                {
+                                    DrawText(__(npcColor), target.transform.position + new Vector3(0f, 2f + currDistance * 0.03f, 0f), "T:", string.Format("<color={0}>{1}</color>", victim.IsSleeping() ? sleeperCC : victim.IsAlive() ? "#00ff00" : activeDeadCC, victim.displayName));
+                                }
+                            }
+
+                            //var isFlying = !target.IsOnGround() || target.IsFlying;
+                            //var isUnderground = target.transform.position.y + 1f < TerrainMeta.HeightMap.GetHeight(target.transform.position);
+                            //npcColor = isFlying ? activeFlyingCC : isUnderground ? activeUndergroundCC : activeCC;
+
                             DrawArrow(__(npcColor), target.transform.position + new Vector3(0f, target.transform.position.y + 10), target.transform.position, 1, false);
                             DrawText(__(npcColor), target.transform.position + new Vector3(0f, 2f, 0f), displayName, string.Format("<color={0}>{1}</color> <color={2}>{3}</color>", healthCC, Math.Floor(target.health), distCC, currDistance.ToString("0")));
                             DrawBox(__(npcColor), target.transform.position + new Vector3(0f, 1f, 0f), target.GetHeight(target.modelState.ducked));
@@ -1840,6 +1983,30 @@ namespace Oxide.Plugins
                 }
 
                 return checks;
+            }
+
+            private BasePlayer GetVictim(BasePlayer target)
+            {
+                if (target is NPCPlayerApex)
+                {
+                    var npc = target as NPCPlayerApex;
+
+                    return npc.AttackTarget as BasePlayer;
+                }
+                else if (target is HTNPlayer)
+                {
+                    var npc = target as HTNPlayer;
+
+                    return npc.MainTarget as BasePlayer;
+                }
+                else if (target is global::HumanNPC)
+                {
+                    var npc = target as global::HumanNPC;
+
+                    return npc.currentTarget as BasePlayer;
+                }
+
+                return null;
             }
 
             private int ShowOre()
@@ -1981,7 +2148,7 @@ namespace Oxide.Plugins
                             if (e is ScrapTransportHelicopter) entityName = "STH";
                             string info = e.Health() <= 0 ? entityName : string.Format("{0} <color={1}>{2}</color>", entityName, healthCC, e.Health() > 1000 ? Math.Floor(e.Health()).ToString("#,##0,K", CultureInfo.InvariantCulture) : Math.Floor(e.Health()).ToString("#0"));
                             Color color = e is ScrapTransportHelicopter ? __(scrapCC) : e is MiniCopter ? __(miniCC) : e is ModularCar ? Color.magenta : __(bradleyCC);
-                            
+
                             DrawText(color, e.transform.position + new Vector3(0f, 2f, 0f), info, string.Format("<color={0}>{1}</color>", distCC, currDistance.ToString("0")));
                             DrawBox(color, e.transform.position + new Vector3(0f, 1f, 0f), GetScale(currDistance));
                             checks++;
@@ -1999,9 +2166,9 @@ namespace Oxide.Plugins
             private string GetContents(List<Item> itemList)
             {
                 _cachedStringBuilder.Append("(");
-                
+
                 for (int index = 0; index < itemList.Count; index++)
-                {   
+                {
                     Item item = itemList[index];
 
                     _cachedStringBuilder.Append(item.info.displayName.english);
@@ -2188,6 +2355,43 @@ namespace Oxide.Plugins
         private Dictionary<string, string> _clanColors = new Dictionary<string, string>();
         private Dictionary<ulong, string> _clans = new Dictionary<ulong, string>();
 
+        private string GetClanColor(ulong targetId)
+        {
+            string clan = GetClanOf(targetId);
+
+            if (string.IsNullOrEmpty(clan) || !_clanColors.ContainsKey(clan))
+            {
+                return null;
+            }
+
+            return _clanColors[clan];
+        }
+
+        private Dictionary<string, string> GetAllClanColors() => _clanColors;
+
+        private string GetTeamColor(ulong teamId)
+        {
+            if (teamId.IsSteamId())
+            {
+                RelationshipManager.PlayerTeam team;
+                if (!RelationshipManager.Instance.playerToTeam.TryGetValue(teamId, out team))
+                {
+                    return null;
+                }
+
+                teamId = team.teamID;
+            }
+
+            if (!_teamColors.ContainsKey(teamId))
+            {
+                return null;
+            }
+
+            return _teamColors[teamId];
+        }
+
+        private Dictionary<ulong, string> GetAllTeamColors() => _teamColors;
+
         private static string GetClanOf(ulong playerId)
         {
             string clan;
@@ -2196,7 +2400,7 @@ namespace Oxide.Plugins
                 return clan;
             }
 
-            clan = ins.Clans?.Call("GetClanOf", playerId) as string ?? string.Empty;
+            clan = ins.Clans?.Call("GetClanOf", playerId) as string;
 
             if (string.IsNullOrEmpty(clan))
             {
@@ -2208,9 +2412,19 @@ namespace Oxide.Plugins
             return clan;
         }
 
-        private void OnTeamCreated(BasePlayer player, RelationshipManager.PlayerTeam team) => _teamColors[team.teamID] = $"#{Core.Random.Range(0x1000000):X6}";
+        private void OnTeamCreated(BasePlayer player, RelationshipManager.PlayerTeam team)
+        {
+            string hex = $"#{Core.Random.Range(0x1000000):X6}";
+            _teamColors[team.teamID] = hex;
+            Interface.CallHook("OnTeamCreatedColor", team.teamID, hex);
+        }
 
-        private void OnClanCreate(string tag) => _clanColors[tag] = $"#{Core.Random.Range(0x1000000):X6}";
+        private void OnClanCreate(string tag) 
+        {
+            string hex = $"#{Core.Random.Range(0x1000000):X6}";
+            _clanColors[tag] = hex;
+            Interface.CallHook("OnClanCreateColor", tag, hex);
+        }
 
         private void OnClanUpdate(string tag) => UpdateClans(tag);
 
@@ -2240,6 +2454,8 @@ namespace Oxide.Plugins
                 _teamColors[team.Key] = $"#{Core.Random.Range(0x1000000):X6}";
             }
 
+            Interface.CallHook("OnTeamColorsInitialized", _teamColors);
+
             var clans = Clans?.Call("GetAllClans");
 
             if (clans is JArray)
@@ -2249,6 +2465,8 @@ namespace Oxide.Plugins
                     _clanColors[token.ToString()] = $"#{Core.Random.Range(0x1000000):X6}";
                 }
             }
+
+            Interface.CallHook("OnClanColorsInitialized", _clanColors);
         }        
 
         private void OnPlayerConnected(BasePlayer player)
@@ -2329,18 +2547,32 @@ namespace Oxide.Plugins
             accessList.RemoveAll(p => p == null || p == player || !p.IsConnected);
         }
 
-        private void OnPlayerTrackStarted(ulong targetId)
+        private void OnPlayerTrackStarted(BasePlayer player, ulong targetId)
         {
-            if (trackers.Contains(targetId)) return;
-            trackers.Add(targetId);
+            List<ulong> list;
+            if (!trackers.TryGetValue(player, out list))
+            {
+                trackers[player] = list = new List<ulong>();
+            }
+
+            if (!list.Contains(targetId))
+            {
+                list.Add(targetId);
+            }
         }
 
-        private void OnPlayerTrackEnded(ulong targetId)
+        private void OnPlayerTrackEnded(BasePlayer player, ulong targetId)
         {
-            trackers.Remove(targetId);
+            List<ulong> list;
+            if (!trackers.TryGetValue(player, out list))
+            {
+                return;
+            }
+
+            list.Remove(targetId);
         }
 
-        private static List<ulong> trackers = new List<ulong>();
+        private static Dictionary<BasePlayer, List<ulong>> trackers = new Dictionary<BasePlayer, List<ulong>>();
 
         private void Unload()
         {
@@ -2353,7 +2585,6 @@ namespace Oxide.Plugins
                 radar.StopAll();
             }
 
-            cache.Clear();
             DestroyAll<Radar>();
             playersColor.Clear();
             tags.Clear();
@@ -2598,7 +2829,7 @@ namespace Oxide.Plugins
                     cache.SupplyDrops.Add(entity as SupplyDrop);
                     return True;
                 }
-                else if (IsBox(entity.ShortPrefabName) || IsLoot(entity.ShortPrefabName) || entity is LockedByEntCrate || entity.prefabID == 186002280)
+                else if (IsBox(entity.ShortPrefabName) || IsLoot(entity.ShortPrefabName) || entity is LockedByEntCrate || entity.prefabID == 186002280) // vendingmachine.deployed
                 {
                     if (!cache.Containers.Contains(entity as StorageContainer))
                     {
@@ -2775,7 +3006,7 @@ namespace Oxide.Plugins
         {
             if (trackLoot)
             {
-                return str.Contains("loot") || str.Contains("crate_") || str.Contains("trash") || str.Contains("hackable") || str.Contains("oil");
+                return str.Contains("loot") || str.Contains("crate_") || str.Contains("trash") || str.Contains("hackable") || str.Contains("oil") || str.Contains("campfire");
             }
 
             return False;
@@ -2891,58 +3122,18 @@ namespace Oxide.Plugins
                 return;
             }
 
-            if (args.Length == 1)
+            if (args.Length >= 1)
             {
                 switch (args[0].ToLower())
                 {
                     case "drops":
                         {
-                            bool hasDrops = False;
-                            DroppedItem drop = null;
-                            double currDistance;
-
-                            bool isAdmin = player.IsAdmin;
-
-                            if (!isAdmin)
-                            {
-                                player.SetPlayerFlag(BasePlayer.PlayerFlags.IsAdmin, true);
-                                player.SendNetworkUpdateImmediate();
-                            }
-                            
-                            foreach (var entity in BaseNetworkable.serverEntities)
-                            {
-                                if (entity is DroppedItem || entity is Landmine || entity is BearTrap || entity is DroppedItemContainer)
-                                {
-                                    drop = entity as DroppedItem;
-                                    string shortname = drop?.item?.info.shortname ?? entity.ShortPrefabName;
-                                    currDistance = (entity.transform.position - player.transform.position).magnitude;
-
-                                    if (currDistance <= dropsDistance)
-                                    {
-                                        if (drawText) player.SendConsoleCommand("ddraw.text", 30f, Color.red, entity.transform.position, string.Format("{0} <color=#FFFF00>{1}</color>", shortname, currDistance.ToString("0")));
-                                        if (drawBox) player.SendConsoleCommand("ddraw.box", 30f, Color.red, entity.transform.position, 0.25f);
-                                        hasDrops = True;
-                                    }
-                                }
-                            }
-
-                            if (!hasDrops)
-                            {
-                                Message(player, msg("NoDrops", player.UserIDString, lootDistance));
-                            }
-
-                            if (!isAdmin)
-                            {
-                                player.SetPlayerFlag(BasePlayer.PlayerFlags.IsAdmin, false);
-                                player.SendNetworkUpdateImmediate();
-                            }
+                            DrawDrops(player);
                         }
                         return;
                     case "online":
                         {
-                            if (storedData.OnlineBoxes.Contains(player.UserIDString))
-                                storedData.OnlineBoxes.Remove(player.UserIDString);
-                            else
+                            if (!storedData.OnlineBoxes.Remove(player.UserIDString))
                                 storedData.OnlineBoxes.Add(player.UserIDString);
 
                             Message(player, msg(storedData.OnlineBoxes.Contains(player.UserIDString) ? "BoxesOnlineOnly" : "BoxesAll", player.UserIDString));
@@ -2950,26 +3141,142 @@ namespace Oxide.Plugins
                         return;
                     case "vision":
                         {
-                            if (storedData.Visions.Contains(player.UserIDString))
-                                storedData.Visions.Remove(player.UserIDString);
-                            else
+                            if (!storedData.Visions.Remove(player.UserIDString))
                                 storedData.Visions.Add(player.UserIDString);
 
                             Message(player, msg(storedData.Visions.Contains(player.UserIDString) ? "VisionOn" : "VisionOff", player.UserIDString));
+                        }
+                        return;
+                    case "train":
+                        {
+                            foreach (var train in BaseNetworkable.serverEntities.OfType<BaseTrain>())
+                            {
+                                timer.Repeat(1f, 60, () => 
+                                {
+                                    player.SendConsoleCommand("ddraw.text", 1f, Color.red, train.transform.position, train.GetType().Name);
+                                });
+                            }
+                        }
+                        return;
+                    case "buildings":
+                        {
+                            DrawBuildings(player);
                         }
                         return;
                     case "ext":
                     case "extend":
                     case "extended":
                         {
-                            if (storedData.Extended.Contains(player.UserIDString))
-                                storedData.Extended.Remove(player.UserIDString);
-                            else
+                            if (!storedData.Extended.Remove(player.UserIDString))
                                 storedData.Extended.Add(player.UserIDString);
 
                             Message(player, msg(storedData.Extended.Contains(player.UserIDString) ? "ExtendedPlayersOn" : "ExtendedPlayersOff", player.UserIDString));
                         }
                         return;
+                    case "setanchormin":
+                        {
+                            if (args.Length >= 1)
+                            {
+                                if (args.Length == 3)
+                                {
+                                    anchorMin = $"{args[1]} {args[2]}";
+
+                                    foreach (var x in activeRadars)
+                                    {
+                                        if (x.player == player)
+                                        {
+                                            DestroyUI(player);
+                                            CreateUI(player, x, isArg(args, "all"));
+                                        }
+                                    }
+                                }
+
+                                Message(player, anchorMin);
+                            }
+                        }
+                        return;
+                    case "setanchormax":
+                        {
+                            if (args.Length >= 1)
+                            {
+                                if (args.Length == 3)
+                                {
+                                    anchorMax = $"{args[1]} {args[2]}";
+
+                                    foreach (var x in activeRadars)
+                                    {
+                                        if (x.player == player)
+                                        {
+                                            DestroyUI(player);
+                                            CreateUI(player, x, isArg(args, "all"));
+                                        }
+                                    }
+                                }
+
+                                Message(player, anchorMax);
+                            }
+                        }
+                        return;
+                    case "anchors_save":
+                        {
+                            Config.Set("GUI", "Anchor Min", anchorMin);
+                            Config.Set("GUI", "Anchor Max", anchorMax);
+                            Config.Save();
+                            Message(player, $"Saved: {anchorMin} {anchorMax}");                            
+                        }
+                        return;
+                    case "anchors_reset":
+                        {
+                            anchorMin = anchorMinDefault;
+                            anchorMax = anchorMaxDefault;
+                            Config.Set("GUI", "Anchor Min", anchorMin);
+                            Config.Set("GUI", "Anchor Max", anchorMax);
+                            Config.Save();
+                            Message(player, $"Reset: {anchorMin} {anchorMax}");                            
+                        }
+                        return;
+                    case "tracker":
+                        {
+                            Message(player, "Feature removed. Use Player Tracker plugin.");                            
+                        }
+                        return;
+                    case "help":
+                        {
+                            Message(player, msg("Help1", player.UserIDString, string.Join(", ", GetButtonNames, "HT")));
+                            Message(player, msg("Help2", player.UserIDString, command, "online"));
+                            Message(player, msg("Help3", player.UserIDString, command, "ui"));
+                            Message(player, msg("Help7", player.UserIDString, command, "vision"));
+                            Message(player, msg("Help8", player.UserIDString, command, "ext"));
+                            Message(player, msg("Help9", player.UserIDString, command, lootDistance));
+                            Message(player, msg("Help5", player.UserIDString, command));
+                            Message(player, msg("Help6", player.UserIDString, command));
+                            Message(player, msg("PreviousFilter", player.UserIDString, command));
+                        }
+                        return;
+                    case "list":
+                        {
+                            var sb = new StringBuilder();
+
+                            if (activeRadars.Count > 0)
+                            {
+                                for (int j = 0; j < activeRadars.Count; j++)
+                                {
+                                    sb.Append(activeRadars[j].player.displayName).Append(", ");
+                                }
+
+                                sb.Length -= 2;
+                            }
+
+                            Message(player, activeRadars.Count == 0 ? msg("NoActiveRadars", player.UserIDString) : msg("ActiveRadars", player.UserIDString, sb.ToString()));                            
+                        }
+                        return;
+                    case "find":
+                        if (args.Length > 1)
+                        {
+                            DrawObjects(player, args[1]);
+                            return;
+                        }
+                        break;
                 }
             }
 
@@ -3000,81 +3307,6 @@ namespace Oxide.Plugins
 
             if (args.Length >= 1)
             {
-                if (args[0] == "setanchormin" && args.Length >= 1)
-                {
-                    if (args.Length == 3)
-                    {
-                        anchorMin = $"{args[1]} {args[2]}";
-
-                        foreach (var x in activeRadars)
-                        {
-                            if (x.player == player)
-                            {
-                                DestroyUI(player);
-                                CreateUI(player, x, isArg(args, "all"));
-                            }
-                        }
-                    }
-
-                    Message(player, anchorMin);
-                    return;
-                }
-                if (args[0] == "setanchormax" && args.Length >= 1)
-                {
-                    if (args.Length == 3)
-                    {
-                        anchorMax = $"{args[1]} {args[2]}";
-
-                        foreach (var x in activeRadars)
-                        {
-                            if (x.player == player)
-                            {
-                                DestroyUI(player);
-                                CreateUI(player, x, isArg(args, "all"));
-                            }
-                        }
-                    }
-
-                    Message(player, anchorMax);
-                    return;
-                }
-                if (args[0] == "anchors_save")
-                {
-                    Config.Set("GUI", "Anchor Min", anchorMin);
-                    Config.Set("GUI", "Anchor Max", anchorMax);
-                    Config.Save();
-                    Message(player, $"Saved: {anchorMin} {anchorMax}");
-                    return;
-                }
-                if (args[0] == "anchors_reset")
-                {
-                    anchorMin = anchorMinDefault;
-                    anchorMax = anchorMaxDefault;
-                    Config.Set("GUI", "Anchor Min", anchorMin);
-                    Config.Set("GUI", "Anchor Max", anchorMax);
-                    Config.Save();
-                    Message(player, $"Reset: {anchorMin} {anchorMax}");
-                    return;
-                }
-                if (args[0] == "tracker")
-                {
-                    Message(player, "Feature removed. Use Player Tracker plugin.");
-                    return;
-                }
-                if (args[0] == "help")
-                {
-                    Message(player, msg("Help1", player.UserIDString, string.Join(", ", GetButtonNames, "HT")));
-                    Message(player, msg("Help2", player.UserIDString, command, "online"));
-                    Message(player, msg("Help3", player.UserIDString, command, "ui"));
-                    Message(player, msg("Help7", player.UserIDString, command, "vision"));
-                    Message(player, msg("Help8", player.UserIDString, command, "ext"));
-                    Message(player, msg("Help9", player.UserIDString, command, lootDistance));
-                    Message(player, msg("Help5", player.UserIDString, command));
-                    Message(player, msg("Help6", player.UserIDString, command));
-                    Message(player, msg("PreviousFilter", player.UserIDString, command));
-                    return;
-                }
-
                 if (args[0].Contains("ui"))
                 {
                     if (storedData.Filters[player.UserIDString].Contains(args[0]))
@@ -3093,25 +3325,10 @@ namespace Oxide.Plugins
 
                     args = storedData.Filters[player.UserIDString].ToArray();
                 }
-                else if (args[0] == "list")
-                {
-                    var sb = new StringBuilder();
-
-                    if (activeRadars.Count > 0)
-                    {
-                        for (int j = 0; j < activeRadars.Count; j++)
-                        {
-                            sb.Append(activeRadars[j].player.displayName).Append(", ");
-                        }
-
-                        sb.Length -= 2;
-                    }
-
-                    Message(player, activeRadars.Count == 0 ? msg("NoActiveRadars", player.UserIDString) : msg("ActiveRadars", player.UserIDString, sb.ToString()));
-                    return;
-                }
                 else if (args[0] == "f")
+                {
                     args = storedData.Filters[player.UserIDString].ToArray();
+                }
             }
 
             if (command == "espgui")
@@ -3240,6 +3457,116 @@ namespace Oxide.Plugins
             }
 
             return False;
+        }
+
+        private void DrawBuildings(BasePlayer player)
+        {
+            bool isAdmin = player.IsAdmin;
+
+            try
+            {
+                if (!isAdmin)
+                {
+                    player.SetPlayerFlag(BasePlayer.PlayerFlags.IsAdmin, true);
+                    player.SendNetworkUpdateImmediate();
+                }
+
+                foreach (var building in BuildingManager.server.buildingDictionary.Values)
+                {
+                    if (building.HasBuildingPrivileges() || !building.HasBuildingBlocks()) continue;
+                    foreach (var block in building.buildingBlocks)
+                    {
+                        if (!block.OwnerID.IsSteamId()) continue;
+                        var targetName = covalence.Players.FindPlayerById(block.OwnerID.ToString())?.Name;
+                        if (string.IsNullOrEmpty(targetName)) continue;
+                        player.SendConsoleCommand("ddraw.text", 180f, Color.red, block.transform.position, $"{targetName} : {block.buildingID}");
+                        break;
+                    }
+                }
+            }
+            finally
+            {
+                if (!isAdmin)
+                {
+                    player.SetPlayerFlag(BasePlayer.PlayerFlags.IsAdmin, false);
+                    player.SendNetworkUpdateImmediate();
+                }
+            }
+        }
+
+        private void DrawObjects(BasePlayer player, string value)
+        {
+            bool isAdmin = player.IsAdmin;
+
+            try
+            {
+                if (!isAdmin)
+                {
+                    player.SetPlayerFlag(BasePlayer.PlayerFlags.IsAdmin, true);
+                    player.SendNetworkUpdateImmediate();
+                }
+
+                foreach (var o in BaseNetworkable.serverEntities.OfType<BaseEntity>())
+                {
+                    if (!o.ShortPrefabName.Contains(value, CompareOptions.OrdinalIgnoreCase)) continue;
+                    player.SendConsoleCommand("ddraw.text", 180f, Color.red, o.transform.position, o.ShortPrefabName);
+                }
+            }
+            finally
+            {
+                if (!isAdmin)
+                {
+                    player.SetPlayerFlag(BasePlayer.PlayerFlags.IsAdmin, false);
+                    player.SendNetworkUpdateImmediate();
+                }
+            }
+        }
+
+        private void DrawDrops(BasePlayer player)
+        {
+            bool hasDrops = False;
+            DroppedItem drop;
+            double currDistance;
+            bool isAdmin = player.IsAdmin;
+
+            try
+            {
+                if (!isAdmin)
+                {
+                    player.SetPlayerFlag(BasePlayer.PlayerFlags.IsAdmin, true);
+                    player.SendNetworkUpdateImmediate();
+                }
+
+                foreach (var entity in BaseNetworkable.serverEntities)
+                {
+                    if (entity is DroppedItem || entity is Landmine || entity is BearTrap || entity is DroppedItemContainer)
+                    {
+                        drop = entity as DroppedItem;
+                        string shortname = drop?.item?.info.shortname ?? entity.ShortPrefabName;
+                        currDistance = (entity.transform.position - player.transform.position).magnitude;
+
+                        if (currDistance <= dropsDistance)
+                        {
+                            if (drawText) player.SendConsoleCommand("ddraw.text", 30f, Color.red, entity.transform.position, string.Format("{0} <color=#FFFF00>{1}</color>", shortname, currDistance.ToString("0")));
+                            if (drawBox) player.SendConsoleCommand("ddraw.box", 30f, Color.red, entity.transform.position, 0.25f);
+                            hasDrops = True;
+                        }
+                    }
+                }
+
+                if (!hasDrops)
+                {
+                    Message(player, msg("NoDrops", player.UserIDString, lootDistance));
+                }
+            }
+            finally
+            {
+                if (!isAdmin)
+                {
+                    player.SetPlayerFlag(BasePlayer.PlayerFlags.IsAdmin, false);
+                    player.SendNetworkUpdateImmediate();
+                }
+            }
         }
 
         #region UI
@@ -3471,7 +3798,8 @@ namespace Oxide.Plugins
         private static int textSize;
         private static int playerPrefixSize;
         private static int playerTextSize;
-
+        private static bool drawTargetsVictim;
+        private static bool ctNameColor;
         private static float mcDistance;
         private static float carDistance;
         private static float boatDistance;
@@ -3516,6 +3844,8 @@ namespace Oxide.Plugins
         private static string miniCC;
         private static string scrapCC;
         private static string activeCC;
+        private static string activeUndergroundCC;
+        private static string activeFlyingCC;
         private static string activeDeadCC;
         private static string corpseCC;
         private static string sleeperCC;
@@ -3811,6 +4141,7 @@ namespace Oxide.Plugins
             playerTextSize = Convert.ToInt32(GetConfig("Settings", "Player Information Text Size", 14));
             prefixSize = Convert.ToInt32(GetConfig("Settings", "Entity Name Text Size", 14));
             textSize = Convert.ToInt32(GetConfig("Settings", "Entity Information Text Size", 14));
+            ctNameColor = Convert.ToBoolean(GetConfig("Settings", "Unique Clan/Team Color Applies To Entire Player Text", false));
 
             blockDamageAnimals = Convert.ToBoolean(GetConfig("When Radar Is Active", "Block Damage To Animals", False));
             blockDamageBuildings = Convert.ToBoolean(GetConfig("When Radar Is Active", "Block Damage To Buildings", False));
@@ -3828,6 +4159,7 @@ namespace Oxide.Plugins
             skipUnderworld = Convert.ToBoolean(GetConfig("Options", "Only Show NPCPlayers At World View", False));
             showTCAuthedCount = Convert.ToBoolean(GetConfig("Options", "Show Authed Count On Cupboards", True));
             showTCBagCount = Convert.ToBoolean(GetConfig("Options", "Show Bag Count On Cupboards", True));
+            drawTargetsVictim = Convert.ToBoolean(GetConfig("Options", "Show Npc Player Target", False));
 
             drawArrows = Convert.ToBoolean(GetConfig("Drawing Methods", "Draw Arrows On Players", False));
             drawBox = Convert.ToBoolean(GetConfig("Drawing Methods", "Draw Boxes", False));
@@ -3880,6 +4212,8 @@ namespace Oxide.Plugins
             miniCC = Convert.ToString(GetConfig("Color-Hex Codes", "MiniCopter", "#ff00ff"));
             scrapCC = Convert.ToString(GetConfig("Color-Hex Codes", "MiniCopter (ScrapTransportHelicopter)", "#ff00ff"));
             activeCC = Convert.ToString(GetConfig("Color-Hex Codes", "Online Player", "#ffffff"));
+            activeUndergroundCC = Convert.ToString(GetConfig("Color-Hex Codes", "Online Player (Underground)", "#ffffff"));
+            activeFlyingCC = Convert.ToString(GetConfig("Color-Hex Codes", "Online Player (Flying)", "#ffffff"));
             activeDeadCC = Convert.ToString(GetConfig("Color-Hex Codes", "Online Dead Player", "#ff0000"));
             sleeperCC = Convert.ToString(GetConfig("Color-Hex Codes", "Sleeping Player", "#00ffff"));
             sleeperDeadCC = Convert.ToString(GetConfig("Color-Hex Codes", "Sleeping Dead Player", "#ff0000"));

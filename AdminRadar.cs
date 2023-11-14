@@ -12,12 +12,21 @@ using Oxide.Core;
 using Oxide.Core.Libraries.Covalence;
 using Oxide.Core.Plugins;
 using Oxide.Game.Rust.Cui;
+using Oxide.Game.Rust.Libraries;
 using Rust;
 using UnityEngine;
 
+/*
+    Fixed UI bug
+    Fixed ore loot amount using parent
+    Fixed potential NRE in Radar.OnDestroy
+    Fixed supplydrop loot not being displayed when enabled
+    Users with `adminradar.bypass.override` will now see admins and fauxadmin users names colored as `magenta` instead of `green or red` to better track their movement
+*/
+
 namespace Oxide.Plugins
 {
-    [Info("Admin Radar", "nivex", "5.0.5")]
+    [Info("Admin Radar", "nivex", "5.0.6")]
     [Description("Radar tool for Admins and Developers.")]
     class AdminRadar : RustPlugin
     {
@@ -63,16 +72,9 @@ namespace Oxide.Plugins
             private readonly StringBuilder _builder = new StringBuilder();
             private string _str;
 
-            internal int Length
+            public void TrimEnd(int num)
             {
-                get
-                {
-                    return _builder.Length;
-                }
-                set
-                {
-                    _builder.Length -= value;
-                }
+                _builder.Length -= num;
             }
 
             public void Append(string val)
@@ -337,6 +339,11 @@ namespace Oxide.Plugins
             private List<BasePlayer> removePlayers;
             private bool limitFlag;
             private int limitIndex;
+            private string playerName;
+            private string playerId;
+            private Vector3 lastPosition;
+            private bool canBypassOverride;
+            private bool hasPermAllowed;
 
             private void Awake()
             {
@@ -357,6 +364,11 @@ namespace Oxide.Plugins
                 player = GetComponent<BasePlayer>();
                 source = player;
                 position = player.transform.position;
+                playerName = player.displayName;
+                playerId = player.UserIDString;
+                lastPosition = position;
+                canBypassOverride = ins.permission.UserHasPermission(playerId, permBypassOverride);
+                hasPermAllowed = ins.permission.UserHasPermission(playerId, permAllowed);
 
                 if (inactiveSeconds > 0f || inactiveMinutes > 0)
                 {
@@ -379,7 +391,7 @@ namespace Oxide.Plugins
 
             private void OnDestroy()
             {
-                Interface.CallHook("AdminRadarDiscordMessage", player.displayName, player.UserIDString, false, player.transform.position);
+                Interface.CallHook("AdminRadarDiscordMessage", playerName, playerId, false, lastPosition);
 
                 StopAll();
                 nearbyPlayers.Clear();
@@ -388,8 +400,8 @@ namespace Oxide.Plugins
                 tcs.Clear();
                 pings.Clear();
 
-                if (radarUI.Contains(player.UserIDString))
-                    ins.DestroyUI(player);
+                if (radarUI != null && radarUI.Contains(player.UserIDString))
+                    DestroyUI(player);
 
                 if (ins == null)
                 {
@@ -520,7 +532,7 @@ namespace Oxide.Plugins
                         yield break;
                     }
 
-                    if (!isAdmin && ins.permission.UserHasPermission(player.UserIDString, permAllowed))
+                    if (!isAdmin && hasPermAllowed)
                     {
                         player.SetPlayerFlag(BasePlayer.PlayerFlags.IsAdmin, True);
                         player.SendNetworkUpdateImmediate();
@@ -531,6 +543,8 @@ namespace Oxide.Plugins
                         yield return Coroutines.WaitForSeconds(0.1f);
                         continue;
                     }
+
+                    lastPosition = source.transform.position;
 
                     if (ShowActive() >= 50)
                     {
@@ -561,7 +575,7 @@ namespace Oxide.Plugins
                         yield break;
                     }
 
-                    if (!isAdmin && ins.permission.UserHasPermission(player.UserIDString, permAllowed))
+                    if (!isAdmin && hasPermAllowed)
                     {
                         player.SetPlayerFlag(BasePlayer.PlayerFlags.IsAdmin, True);
                         player.SendNetworkUpdateImmediate();
@@ -1098,12 +1112,17 @@ namespace Oxide.Plugins
                             continue;
                         }
 
-                        if (ins.permission.UserHasPermission(target.UserIDString, permBypass) && !ins.permission.UserHasPermission(player.UserIDString, permBypassOverride))
+                        if (ins.permission.UserHasPermission(target.UserIDString, permBypass) && !canBypassOverride)
                         {
                             continue;
                         }
 
                         color = __(target.IsAlive() ? activeCC : activeDeadCC);
+                        
+                        if ((target.IsAdmin || ins.permission.UserHasPermission(target.UserIDString, "fauxadmin.allowed")) && canBypassOverride)
+                        {
+                            color = Color.magenta;
+                        }
 
                         if (currDistance < playerDistance)
                         {
@@ -1518,7 +1537,7 @@ namespace Oxide.Plugins
                                 continue;
 
                             string text = showAirdropContents && drop.inventory.itemList.Count > 0 ? GetContents(drop.inventory.itemList) : string.Format("({0}) ", drop.inventory.itemList.Count);
-
+                            
                             DrawText(__(airdropCC), drop.transform.position + new Vector3(0f, 0.5f, 0f), string.Format("{0} {1}<color={2}>{3}</color>", ins._(drop.ShortPrefabName), text, distCC, currDistance.ToString("0"), lootCC));
                             DrawBox(__(airdropCC), drop.transform.position + new Vector3(0f, 0.5f, 0f), GetScale(currDistance));
                             checks++;
@@ -1935,18 +1954,19 @@ namespace Oxide.Plugins
             private string GetContents(List<Item> itemList)
             {
                 _cachedStringBuilder.Append("(");
-
+                
                 for (int index = 0; index < itemList.Count; index++)
-                {
+                {   
                     var item = itemList[index];
-                    _cachedStringBuilder.Append(item.info.displayName.translated);
+                    
+                    _cachedStringBuilder.Append(item.info.displayName.english);
                     _cachedStringBuilder.Append(" ");
                     _cachedStringBuilder.Append("(");
                     _cachedStringBuilder.Append(item.amount);
                     _cachedStringBuilder.Append("), ");
                 }
 
-                _cachedStringBuilder.Length -= 2;
+                _cachedStringBuilder.TrimEnd(2);
                 _cachedStringBuilder.Append(") ");
 
                 return _cachedStringBuilder.ToString();
@@ -2447,7 +2467,7 @@ namespace Oxide.Plugins
                 {
                     float amount = 0;
 
-                    foreach (var item in entity.GetComponentInParent<ResourceDispenser>().containedItems)
+                    foreach (var item in entity.GetComponent<ResourceDispenser>().containedItems)
                     {
                         amount += item.amount;
                     }
@@ -3027,11 +3047,11 @@ namespace Oxide.Plugins
         #region UI
 
         private static string[] uiBtnNames = new string[0];
-        private static Dictionary<int, Dictionary<string, string>> uiButtons;
+        private static Dictionary<int, UIButton> uiButtons;
         private static readonly List<string> radarUI = new List<string>();
-        private readonly string UI_PanelName = "AdminRadar_UI";
+        private const string UI_PanelName = "AdminRadar_UI";
 
-        public void DestroyUI(BasePlayer player)
+        public static void DestroyUI(BasePlayer player)
         {
             CuiHelper.DestroyUi(player, UI_PanelName);
             radarUI.Remove(player.UserIDString);
@@ -3089,8 +3109,7 @@ namespace Oxide.Plugins
 
             for (int x = 0; x < buttonNames.Length; x++)
             {
-                if (!buttons.ContainsKey(x) || !buttons[x].ContainsKey("Anchor") || !buttons[x].ContainsKey("Offset")) continue;
-                UI.CreateButton(ref element, UI_PanelName, esp.GetBool(buttonNames[x]) ? uiColorOn : uiColorOff, msg(buttonNames[x], player.UserIDString), fontSize, buttons[x]["Anchor"], buttons[x]["Offset"], "espgui " + buttonNames[x]);
+                UI.CreateButton(ref element, UI_PanelName, esp.GetBool(buttonNames[x]) ? uiColorOn : uiColorOff, msg(buttonNames[x], player.UserIDString), fontSize, buttons[x].Anchor, buttons[x].Offset, "espgui " + buttonNames[x]);
             }
 
             if (element == null || element.Count == 0)
@@ -3141,13 +3160,19 @@ namespace Oxide.Plugins
             }
         }
 
-        public Dictionary<int, Dictionary<string, string>> CreateButtons
+        public class UIButton 
+        {
+            public string Anchor { get; set; }
+            public string Offset { get; set; }
+        }
+
+        public Dictionary<int, UIButton> CreateButtons
         {
             get
             {
                 if (uiButtons == null)
                 {
-                    uiButtons = new Dictionary<int, Dictionary<string, string>>();
+                    uiButtons = new Dictionary<int, UIButton>();
 
                     int amount = uiBtnNames.Length;
                     double anchorMin = amount > 12 ? 0.011 : 0.017;
@@ -3168,11 +3193,11 @@ namespace Oxide.Plugins
                             offsetMin += (amount > 12 ? 0.280 : 0.326);
                         }
 
-                        uiButtons.Add(count, new Dictionary<string, string>()
+                        uiButtons[count] = new UIButton
                         {
-                            ["Anchor"] = $"{anchorMin} {anchorMax}",
-                            ["Offset"] = $"{offsetMin} {offsetMax}",
-                        });
+                            Anchor = $"{anchorMin} {anchorMax}",
+                            Offset = $"{offsetMin} {offsetMax}",
+                        };
 
                         anchorMax -= (amount > 12 ? 0.329 : 0.239);
                         offsetMax -= (amount > 12 ? 0.329 : 0.239);

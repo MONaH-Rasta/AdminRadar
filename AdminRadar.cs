@@ -17,14 +17,17 @@ using Rust;
 using UnityEngine;
 
 /*
-    Fixed UI not showing after connecting to the server and waking up
-    Added permission `adminradar.list` - allows players with this permission to use `/radar list`
-    Cleanup of Cache on Unload
+    Added `Color-Hex Codes` - `MiniCopter (ScrapTransportHelicopter)` (#ff00ff)
+    Added `Color-Hex Codes` - `MiniCopter` (#ff00ff)
+    Added hook API with no return behavior `void OnRadarActivated(BasePlayer player)`
+    Added hook API with no return behavior `void OnRadarDeactivated(BasePlayer player)`
+    Command `radar drops` will now work with permission adminradar.allowed
+    Possible fix for CreateUI
 */
 
 namespace Oxide.Plugins
 {
-    [Info("Admin Radar", "nivex", "5.0.7")]
+    [Info("Admin Radar", "nivex", "5.0.8")]
     [Description("Radar tool for Admins and Developers.")]
     class AdminRadar : RustPlugin
     {
@@ -51,7 +54,6 @@ namespace Oxide.Plugins
         private readonly Dictionary<ulong, Timer> voices = new Dictionary<ulong, Timer>();
         private readonly List<Radar> activeRadars = new List<Radar>();
         private readonly List<string> warnings = new List<string>();
-
         private readonly Dictionary<ulong, float> cooldowns = new Dictionary<ulong, float>();
         private static Cache cache = new Cache();
         private Coroutine coroutine;
@@ -402,6 +404,7 @@ namespace Oxide.Plugins
                 }
 
                 ins.AdminRadarDiscordMessage(player.displayName, player.UserIDString, true, player.transform.position);
+                Interface.CallHook("OnRadarActivated", player);
             }
 
             public void StopAll()
@@ -418,6 +421,7 @@ namespace Oxide.Plugins
             private void OnDestroy()
             {
                 Interface.CallHook("AdminRadarDiscordMessage", playerName, playerId, false, lastPosition);
+                Interface.CallHook("OnRadarDeactivated", player);
 
                 StopAll();
                 nearbyPlayers.Clear();
@@ -1962,9 +1966,10 @@ namespace Oxide.Plugins
                             else if (entityType == EntityType.CH47Helicopters && !trackCH47 && !uiBtnCH47) continue;
 
                             string info = e.Health() <= 0 ? entityName : string.Format("{0} <color={1}>{2}</color>", entityName, healthCC, e.Health() > 1000 ? Math.Floor(e.Health()).ToString("#,##0,K", CultureInfo.InvariantCulture) : Math.Floor(e.Health()).ToString("#0"));
+                            Color color = e is ScrapTransportHelicopter ? __(scrapCC) : e is MiniCopter ? __(miniCC) : __(bradleyCC);
 
-                            DrawText(__(bradleyCC), e.transform.position + new Vector3(0f, 2f, 0f), string.Format("{0} <color={1}>{2}</color>", info, distCC, currDistance.ToString("0")));
-                            DrawBox(__(bradleyCC), e.transform.position + new Vector3(0f, 1f, 0f), GetScale(currDistance));
+                            DrawText(color, e.transform.position + new Vector3(0f, 2f, 0f), string.Format("{0} <color={1}>{2}</color>", info, distCC, currDistance.ToString("0")));
+                            DrawBox(color, e.transform.position + new Vector3(0f, 1f, 0f), GetScale(currDistance));
                             checks++;
                         }
                     }
@@ -2785,6 +2790,14 @@ namespace Oxide.Plugins
                             DroppedItem drop = null;
                             double currDistance;
 
+                            bool isAdmin = player.IsAdmin;
+
+                            if (!isAdmin)
+                            {
+                                player.SetPlayerFlag(BasePlayer.PlayerFlags.IsAdmin, true);
+                                player.SendNetworkUpdateImmediate();
+                            }
+
                             foreach (var entity in BaseNetworkable.serverEntities)
                             {
                                 if (entity is DroppedItem || entity is Landmine || entity is BearTrap || entity is DroppedItemContainer)
@@ -2805,6 +2818,12 @@ namespace Oxide.Plugins
                             if (!hasDrops)
                             {
                                 Message(player, msg("NoDrops", player.UserIDString, lootDistance));
+                            }
+
+                            if (!isAdmin)
+                            {
+                                player.SetPlayerFlag(BasePlayer.PlayerFlags.IsAdmin, false);
+                                player.SendNetworkUpdateImmediate();
                             }
                         }
                         return;
@@ -3183,38 +3202,33 @@ namespace Oxide.Plugins
         {
             get
             {
-                if (uiBtnNames.Length == 0)
-                {
-                    var list = new List<string>() { "All" };
+                var list = new List<string>() { "All" };
 
-                    if (uiBtnBags) list.Add("Bags");
-                    if (uiBtnBoats) list.Add("Boats");
-                    if (uiBtnBox) list.Add("Box");
-                    if (uiBtnBradley) list.Add("Bradley");
-                    if (uiBtnCargoPlanes) list.Add("CargoPlanes");
-                    if (uiBtnCargoShips) list.Add("CargoShips");
-                    if (uiBtnCars) list.Add("Cars");
-                    if (uiBtnCCTV) list.Add("CCTV");
-                    if (uiBtnCH47) list.Add("CH47");
-                    if (uiBtnCollectible) list.Add("Collectibles");
-                    if (uiBtnDead) list.Add("Dead");
-                    if (uiBtnHeli) list.Add("Heli");
-                    if (uiBtnLoot) list.Add("Loot");
-                    if (uiBtnMiniCopter) list.Add("MiniCopter");
-                    if (uiBtnNPC) list.Add("NPC");
-                    if (uiBtnOre) list.Add("Ore");
-                    if (uiBtnRidableHorses) list.Add("Horses");
-                    if (uiBtnRHIB) list.Add("RHIB");
-                    if (uiBtnSleepers) list.Add("Sleepers");
-                    if (uiBtnStash) list.Add("Stash");
-                    if (uiBtnTC) list.Add("TC");
-                    if (uiBtnTCArrow) list.Add("TCArrows");
-                    if (uiBtnTurrets) list.Add("Turrets");
+                if (uiBtnBags) list.Add("Bags");
+                if (uiBtnBoats) list.Add("Boats");
+                if (uiBtnBox) list.Add("Box");
+                if (uiBtnBradley) list.Add("Bradley");
+                if (uiBtnCargoPlanes) list.Add("CargoPlanes");
+                if (uiBtnCargoShips) list.Add("CargoShips");
+                if (uiBtnCars) list.Add("Cars");
+                if (uiBtnCCTV) list.Add("CCTV");
+                if (uiBtnCH47) list.Add("CH47");
+                if (uiBtnCollectible) list.Add("Collectibles");
+                if (uiBtnDead) list.Add("Dead");
+                if (uiBtnHeli) list.Add("Heli");
+                if (uiBtnLoot) list.Add("Loot");
+                if (uiBtnMiniCopter) list.Add("MiniCopter");
+                if (uiBtnNPC) list.Add("NPC");
+                if (uiBtnOre) list.Add("Ore");
+                if (uiBtnRidableHorses) list.Add("Horses");
+                if (uiBtnRHIB) list.Add("RHIB");
+                if (uiBtnSleepers) list.Add("Sleepers");
+                if (uiBtnStash) list.Add("Stash");
+                if (uiBtnTC) list.Add("TC");
+                if (uiBtnTCArrow) list.Add("TCArrows");
+                if (uiBtnTurrets) list.Add("Turrets");
 
-                    uiBtnNames = list.ToArray();
-                }
-
-                return uiBtnNames;
+                return uiBtnNames = list.ToArray();
             }
         }
 
@@ -3228,38 +3242,35 @@ namespace Oxide.Plugins
         {
             get
             {
-                if (uiButtons == null)
+                uiButtons = new Dictionary<int, UIButton>();
+
+                int amount = uiBtnNames.Length;
+                double anchorMin = amount > 12 ? 0.011 : 0.017;
+                double anchorMax = amount > 12 ? 0.675 : 0.739;
+                double offsetMin = amount > 12 ? 0.275 : 0.331;
+                double offsetMax = amount > 12 ? 0.957 : 0.957;
+                double defaultAnchorMax = anchorMax;
+                double defaultOffsetMax = offsetMax;
+                int rowMax = 4;
+
+                for (int count = 0; count < amount; count++)
                 {
-                    uiButtons = new Dictionary<int, UIButton>();
-
-                    int amount = uiBtnNames.Length;
-                    double anchorMin = amount > 12 ? 0.011 : 0.017;
-                    double anchorMax = amount > 12 ? 0.675 : 0.739;
-                    double offsetMin = amount > 12 ? 0.275 : 0.331;
-                    double offsetMax = amount > 12 ? 0.957 : 0.957;
-                    double defaultAnchorMax = anchorMax;
-                    double defaultOffsetMax = offsetMax;
-                    int rowMax = 4;
-
-                    for (int count = 0; count < amount; count++)
+                    if (count > 0 && count % rowMax == 0)
                     {
-                        if (count > 0 && count % rowMax == 0)
-                        {
-                            anchorMax = defaultAnchorMax;
-                            offsetMax = defaultOffsetMax;
-                            anchorMin += (amount > 12 ? 0.280 : 0.326);
-                            offsetMin += (amount > 12 ? 0.280 : 0.326);
-                        }
-
-                        uiButtons[count] = new UIButton
-                        {
-                            Anchor = $"{anchorMin} {anchorMax}",
-                            Offset = $"{offsetMin} {offsetMax}",
-                        };
-
-                        anchorMax -= (amount > 12 ? 0.329 : 0.239);
-                        offsetMax -= (amount > 12 ? 0.329 : 0.239);
+                        anchorMax = defaultAnchorMax;
+                        offsetMax = defaultOffsetMax;
+                        anchorMin += (amount > 12 ? 0.280 : 0.326);
+                        offsetMin += (amount > 12 ? 0.280 : 0.326);
                     }
+
+                    uiButtons[count] = new UIButton
+                    {
+                        Anchor = $"{anchorMin} {anchorMax}",
+                        Offset = $"{offsetMin} {offsetMax}",
+                    };
+
+                    anchorMax -= (amount > 12 ? 0.329 : 0.239);
+                    offsetMax -= (amount > 12 ? 0.329 : 0.239);
                 }
 
                 return uiButtons;
@@ -3375,6 +3386,8 @@ namespace Oxide.Plugins
         private static string distCC;
         private static string heliCC;
         private static string bradleyCC;
+        private static string miniCC;
+        private static string scrapCC;
         private static string activeCC;
         private static string activeDeadCC;
         private static string corpseCC;
@@ -3724,6 +3737,8 @@ namespace Oxide.Plugins
             distCC = Convert.ToString(GetConfig("Color-Hex Codes", "Distance", "#ffa500"));
             heliCC = Convert.ToString(GetConfig("Color-Hex Codes", "Helicopters", "#ff00ff"));
             bradleyCC = Convert.ToString(GetConfig("Color-Hex Codes", "Bradley", "#ff00ff"));
+            miniCC = Convert.ToString(GetConfig("Color-Hex Codes", "MiniCopter", "#ff00ff"));
+            scrapCC = Convert.ToString(GetConfig("Color-Hex Codes", "MiniCopter (ScrapTransportHelicopter)", "#ff00ff"));
             activeCC = Convert.ToString(GetConfig("Color-Hex Codes", "Online Player", "#ffffff"));
             activeDeadCC = Convert.ToString(GetConfig("Color-Hex Codes", "Online Dead Player", "#ff0000"));
             sleeperCC = Convert.ToString(GetConfig("Color-Hex Codes", "Sleeping Player", "#00ffff"));

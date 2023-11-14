@@ -7,6 +7,7 @@ using System.Linq;
 using System.Text;
 using System.Text.RegularExpressions;
 using Facepunch;
+using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using Oxide.Core;
 using Oxide.Core.Libraries.Covalence;
@@ -17,24 +18,99 @@ using Rust;
 using UnityEngine;
 
 /*
-Added `Show Npc Player Target` (false)
-Added `Color Hex Codes > Online Player (Underground)` (FFFFFF)
-Added `Color Hex Codes > Online Player (Flying)` (FFFFFF)
-Added `Unique Clan/Team Color Applies To Entire Player Text` (false) @Flammable
-Added command `/radar buildings` - draws the location of buildings without a TC for 3 minutes
-Visions will no longer be drawn if the radar user is beyond 150 meters from the player
+Fix for Rust update
+Fixed exploit where users could retain temporary admin flag
+Added `/radar findbyid <id>` which will draw on your screen the location of each base owned by this user
+Added `Additional Tracking -> Backpacks Plugin` (false) - shows an asterisk if player has items in their backpack @dbmdude
+Added sharks to npc filter
+Simplified several npc names and added them to the language file
 */
 
+// make all entities dynamic and where they can be assigned to any filter or their own
+// implement toggable filters
+
+// add subs
 //cache deployables
 //https://umod.org/community/admin-radar/32562-show-if-person-near-tc
 
 namespace Oxide.Plugins
 {
-    [Info("Admin Radar", "nivex", "5.1.4")]
+    [Info("Admin Radar", "nivex", "5.1.5")]
     [Description("Radar tool for Admins and Developers.")]
     class AdminRadar : RustPlugin
     {
-        [PluginReference] Plugin Vanish, DiscordMessages, Clans;
+        private class Cache
+        {
+            public readonly List<BaseEntity> Animals = new List<BaseEntity>();
+            public readonly List<BaseEntity> CargoPlanes = new List<BaseEntity>();
+            public readonly List<DroppedItemContainer> Backpacks = new List<DroppedItemContainer>();
+            public readonly List<BaseEntity> Bags = new List<BaseEntity>();
+            public readonly List<BaseEntity> Boats = new List<BaseEntity>();
+            public readonly List<BradleyAPC> BradleyAPCs = new List<BradleyAPC>();
+            public readonly List<BaseEntity> CargoShips = new List<BaseEntity>();
+            public readonly List<BaseEntity> Cars = new List<BaseEntity>();
+            public readonly List<CCTV_RC> CCTV = new List<CCTV_RC>();
+            public readonly List<BaseEntity> CH47 = new List<BaseEntity>();
+            public readonly List<BuildingPrivlidge> Cupboards = new List<BuildingPrivlidge>();
+            public readonly Dictionary<Vector3, CachedInfo> Collectibles = new Dictionary<Vector3, CachedInfo>();
+            public readonly List<StorageContainer> Containers = new List<StorageContainer>();
+            public readonly Dictionary<PlayerCorpse, CachedInfo> Corpses = new Dictionary<PlayerCorpse, CachedInfo>();
+            public readonly List<BaseHelicopter> Helicopters = new List<BaseHelicopter>();
+            public readonly List<BaseEntity> MiniCopter = new List<BaseEntity>();
+            public readonly List<BasePlayer> NPCPlayers = new List<BasePlayer>();
+            public readonly Dictionary<Vector3, CachedInfo> Ores = new Dictionary<Vector3, CachedInfo>();
+            public readonly List<BaseEntity> RHIB = new List<BaseEntity>();
+            public readonly List<BaseEntity> RidableHorse = new List<BaseEntity>();
+            public readonly List<SupplyDrop> SupplyDrops = new List<SupplyDrop>();
+            public readonly List<AutoTurret> Turrets = new List<AutoTurret>();
+            public readonly List<Zombie> Zombies = new List<Zombie>();
+
+            public class CacheInfo
+            {
+                public string shortname;
+                public string typename;
+                public string color;
+                public float distance;
+
+                [JsonIgnore]
+                public List<BaseEntity> entities = new List<BaseEntity>();
+
+                public bool isNew() => shortname == null && typename == null;
+            }
+
+            private Dictionary<string, CacheInfo> dict = new Dictionary<string, CacheInfo>();
+
+            private void Create()
+            {
+                foreach (var entity in BaseNetworkable.serverEntities.OfType<BaseEntity>())
+                {
+                    CacheInfo ci;
+                    if (!dict.TryGetValue(entity.GetType().Name, out ci))
+                    {
+                        dict[entity.GetType().Name] = ci = new CacheInfo();
+                    }
+
+                    if (!dict.ContainsKey(entity.ShortPrefabName))
+                    {
+                        dict[entity.ShortPrefabName] = ci;
+                    }
+
+                    ci.entities.Add(entity);
+                    
+                    if (ci.isNew())
+                    {
+                        ci.shortname = entity.ShortPrefabName;
+                        ci.typename = entity.GetType().Name;
+                        ci.color = "#000000";
+                        ci.distance = 100f;
+
+                        cis.Add(ci);
+                    }
+                }
+            }
+        }
+
+        [PluginReference] Plugin Vanish, DiscordMessages, Clans, Backpacks;
 
         private const string permAllowed = "adminradar.allowed";
         private const string permBypass = "adminradar.bypass";
@@ -121,33 +197,6 @@ namespace Oxide.Plugins
         }
 
         private static CachedStringBuilder _cachedStringBuilder { get; set; }
-
-        private class Cache
-        {
-            public readonly List<BaseNpc> Animals = new List<BaseNpc>();
-            public readonly List<BaseEntity> CargoPlanes = new List<BaseEntity>();
-            public readonly List<DroppedItemContainer> Backpacks = new List<DroppedItemContainer>();
-            public readonly Dictionary<Vector3, CachedInfo> Bags = new Dictionary<Vector3, CachedInfo>();
-            public readonly List<BaseEntity> Boats = new List<BaseEntity>();
-            public readonly List<BradleyAPC> BradleyAPCs = new List<BradleyAPC>();
-            public readonly List<BaseEntity> CargoShips = new List<BaseEntity>();
-            public readonly List<BaseEntity> Cars = new List<BaseEntity>();
-            public readonly List<CCTV_RC> CCTV = new List<CCTV_RC>();
-            public readonly List<BaseEntity> CH47 = new List<BaseEntity>();
-            public readonly List<BuildingPrivlidge> Cupboards = new List<BuildingPrivlidge>();
-            public readonly Dictionary<Vector3, CachedInfo> Collectibles = new Dictionary<Vector3, CachedInfo>();
-            public readonly List<StorageContainer> Containers = new List<StorageContainer>();
-            public readonly Dictionary<PlayerCorpse, CachedInfo> Corpses = new Dictionary<PlayerCorpse, CachedInfo>();
-            public readonly List<BaseHelicopter> Helicopters = new List<BaseHelicopter>();
-            public readonly List<BaseEntity> MiniCopter = new List<BaseEntity>();
-            public readonly List<BasePlayer> NPCPlayers = new List<BasePlayer>();
-            public readonly Dictionary<Vector3, CachedInfo> Ores = new Dictionary<Vector3, CachedInfo>();
-            public readonly List<BaseEntity> RHIB = new List<BaseEntity>();
-            public readonly List<BaseEntity> RidableHorse = new List<BaseEntity>();
-            public readonly List<SupplyDrop> SupplyDrops = new List<SupplyDrop>();
-            public readonly List<AutoTurret> Turrets = new List<AutoTurret>();
-            public readonly List<Zombie> Zombies = new List<Zombie>();
-        }
 
         private class StoredData
         {
@@ -360,6 +409,7 @@ namespace Oxide.Plugins
 
                 player = GetComponent<BasePlayer>();
                 source = player;
+                isAdmin = player.IsAdmin;
                 position = player.transform.position;
                 playerName = player.displayName;
                 playerId = player.UserIDString;
@@ -510,8 +560,6 @@ namespace Oxide.Plugins
 
             public void Start()
             {
-                isAdmin = player.IsAdmin;
-
                 if (_routine != null)
                 {
                     StopCoroutine(_routine);
@@ -556,12 +604,7 @@ namespace Oxide.Plugins
                     ShowSleepers();
                     //Draw();
 
-                    if (!isAdmin && player.HasPlayerFlag(BasePlayer.PlayerFlags.IsAdmin))
-                    {
-                        player.SetPlayerFlag(BasePlayer.PlayerFlags.IsAdmin, False);
-                        player.SendNetworkUpdateImmediate();
-                    }
-
+                    RemoveAdmin(player);
                     checks = 0;
                     yield return CoroutineEx.waitForSeconds(invokeTime);
                 } while (player.IsValid() && player.IsConnected);
@@ -718,25 +761,25 @@ namespace Oxide.Plugins
                     ShowCollectables();
                     //Draw();
 
-                    if (!isAdmin && player.HasPlayerFlag(BasePlayer.PlayerFlags.IsAdmin))
-                    {
-                        player.SetPlayerFlag(BasePlayer.PlayerFlags.IsAdmin, False);
-                        player.SendNetworkUpdateImmediate();
-                    }
+                    RemoveAdmin(player);
 
                     checks = 0;
                     yield return CoroutineEx.waitForSeconds(invokeTime);
                 } while (player.IsValid() && player.IsConnected);
             }
 
-            private void HandleException(Exception ex)
+            private void RemoveAdmin(BasePlayer player)
             {
-                if (!isAdmin && player.HasPlayerFlag(BasePlayer.PlayerFlags.IsAdmin))
+                if (player != null && !isAdmin && player.HasPlayerFlag(BasePlayer.PlayerFlags.IsAdmin))
                 {
                     player.SetPlayerFlag(BasePlayer.PlayerFlags.IsAdmin, False);
                     player.SendNetworkUpdateImmediate();
                 }
+            }
 
+            private void HandleException(Exception ex)
+            {
+                RemoveAdmin(player);
                 ins.Puts("Error @{0}: {1} --- {2}", Enum.GetName(typeof(EntityType), entityType), ex.Message, ex.StackTrace);
                 Message(player, ins.msg("Exception", player.UserIDString));
 
@@ -952,6 +995,29 @@ namespace Oxide.Plugins
                 uiButtons = null;
             }
 
+            private bool API_GetExistingBackpacks(ulong playerId)
+            {
+                if (!ins.trackBackpacks)
+                {
+                    return false;
+                }
+
+                var backpacks = ins.Backpacks?.Call("API_GetExistingBackpacks") as Dictionary<ulong, ItemContainer>;
+
+                if (backpacks == null)
+                {
+                    return false;
+                }
+
+                ItemContainer container;
+                if (backpacks.TryGetValue(playerId, out container) && !container.IsEmpty())
+                {
+                    return true;
+                }
+
+                return false;
+            }
+
             private Vector3 GetNearestCupboard(BasePlayer target)
             {
                 var positions = new List<Vector3>();
@@ -1044,7 +1110,10 @@ namespace Oxide.Plugins
                 }
 
                 if (player == source && (player.IsDead() || player.IsSleeping() || player.HasPlayerFlag(BasePlayer.PlayerFlags.ReceivingSnapshot)))
+                {
+                    RemoveAdmin(player);
                     return False;
+                }
 
                 return True;
             }
@@ -1245,6 +1314,11 @@ namespace Oxide.Plugins
                                 _cachedStringBuilder.Append(" ");
                                 _cachedStringBuilder.Append(GetAveragePing(target));
                                 _cachedStringBuilder.Append("ms");
+                            }
+
+                            if (API_GetExistingBackpacks(target.userID))
+                            {
+                                _cachedStringBuilder.Append("*");
                             }
 
                             string clanCC;
@@ -1779,12 +1853,14 @@ namespace Oxide.Plugins
                 {
                     foreach (var bag in cache.Bags)
                     {
-                        currDistance = (bag.Key - source.transform.position).magnitude;
+                        if (bag == null || bag.IsDestroyed) continue;
+
+                        currDistance = (bag.transform.position - source.transform.position).magnitude;
 
                         if (currDistance < bagDistance && currDistance < maxDistance)
                         {
-                            DrawText(__(bagCC), bag.Key, "bag", string.Format("<color={0}>{1}</color>", distCC, currDistance.ToString("0")));
-                            DrawBox(__(bagCC), bag.Key, bag.Value.Size);
+                            DrawText(__(bagCC), bag.transform.position, "bag", string.Format("<color={0}>{1}</color>", distCC, currDistance.ToString("0")));
+                            DrawBox(__(bagCC), bag.transform.position, 0.5f);
                             checks++;
                         }
                     }
@@ -1926,7 +2002,7 @@ namespace Oxide.Plugins
                             }
                         }
 
-                        string npcColor = target is HTNPlayer ? htnscientistCC : target.ShortPrefabName.Contains("peacekeeper") ? peacekeeperCC : target.name.Contains("scientist") ? scientistCC : target.ShortPrefabName == "murderer" ? murdererCC : npcCC;
+                        string npcColor = target.ShortPrefabName.Contains("peacekeeper") ? peacekeeperCC : target.name.Contains("scientist") ? scientistCC : target.ShortPrefabName == "murderer" ? murdererCC : npcCC;
 
                         if (currDistance < npcPlayerDistance)
                         {
@@ -1936,7 +2012,7 @@ namespace Oxide.Plugins
                             {
                                 displayName = target.displayName;
                             }
-                            else displayName = displayName = target.ShortPrefabName == "scarecrow" ? ins.msg("scarecrow", id) : target.PrefabName.Contains("scientist") ? ins.msg("scientist", id) : target is NPCMurderer ? ins.msg("murderer", id) : ins.msg("npc", id);
+                            else displayName = displayName = target.ShortPrefabName == "scarecrow" ? ins.msg("scarecrow", id) : target.PrefabName.Contains("scientist") ? ins.msg("scientist", id) : ins.msg(target.ShortPrefabName, id);
 
                             if (drawTargetsVictim)
                             {
@@ -1971,7 +2047,17 @@ namespace Oxide.Plugins
 
                         if (currDistance < npcDistance && currDistance < maxDistance)
                         {
-                            DrawText(__(npcCC), npc.transform.position + new Vector3(0f, 1f, 0f), npc.ShortPrefabName, string.Format("<color={0}>{1}</color> <color={2}>{3}</color>", healthCC, Math.Floor(npc.health), distCC, currDistance.ToString("0")));
+                            if (drawTargetsVictim)
+                            {
+                                var victim = GetVictim(npc);
+
+                                if (!string.IsNullOrEmpty(victim?.displayName))
+                                {
+                                    DrawText(Color.yellow, npc.transform.position + new Vector3(0f, 2f + currDistance * 0.03f, 0f), "T:", string.Format("<color={0}>{1}</color>", victim.IsSleeping() ? sleeperCC : victim.IsAlive() ? "#00ff00" : activeDeadCC, victim.displayName));
+                                }
+                            }
+
+                            DrawText(__(npcCC), npc.transform.position + new Vector3(0f, 1f, 0f), ins.msg(npc.ShortPrefabName), string.Format("<color={0}>{1}</color> <color={2}>{3}</color>", healthCC, Math.Floor(npc.Health()), distCC, currDistance.ToString("0")));
                             DrawBox(__(npcCC), npc.transform.position + new Vector3(0f, 1f, 0f), npc.bounds.size.y);
                             checks++;
                         }
@@ -1985,26 +2071,23 @@ namespace Oxide.Plugins
                 return checks;
             }
 
-            private BasePlayer GetVictim(BasePlayer target)
+            private BasePlayer GetVictim(BaseEntity entity)
             {
-                if (target is NPCPlayerApex)
+                if (entity is global::HumanNPC)
                 {
-                    var npc = target as NPCPlayerApex;
+                    var npc = entity as global::HumanNPC;
 
-                    return npc.AttackTarget as BasePlayer;
+                    return npc.GetBestTarget() as BasePlayer;
                 }
-                else if (target is HTNPlayer)
+                /*else if (entity is BaseAnimalNPC) // brain must be exposed
                 {
-                    var npc = target as HTNPlayer;
+                    var npc = entity as BaseAnimalNPC;
 
-                    return npc.MainTarget as BasePlayer;
-                }
-                else if (target is global::HumanNPC)
-                {
-                    var npc = target as global::HumanNPC;
-
-                    return npc.currentTarget as BasePlayer;
-                }
+                    foreach (var target in npc.brain.Senses.Players)
+                    {
+                        return target as BasePlayer;
+                    }
+                }*/
 
                 return null;
             }
@@ -2512,7 +2595,7 @@ namespace Oxide.Plugins
             }
         }
 
-        void OnPlayerVoice(BasePlayer player, Byte[] data)
+        void OnPlayerVoice(BasePlayer player, byte[] data)
         {
             ulong userId = player.userID;
 
@@ -2596,6 +2679,7 @@ namespace Oxide.Plugins
             groupColors.Clear();
             cooldowns.Clear();
             trackers.Clear();
+            cis.Clear();
             ins = null;
             _cachedStringBuilder = null;
         }
@@ -2768,7 +2852,7 @@ namespace Oxide.Plugins
 
             var position = entity.transform.position;
 
-            if (trackNPC && (entity.IsNpc || entity is BasePlayer))
+            if (trackNPC && (entity.IsNpc || entity is SimpleShark))
             {
                 if (trackRidableHorses && entity is RidableHorse)
                 {
@@ -2778,10 +2862,13 @@ namespace Oxide.Plugins
                         return True;
                     }
                 }
-                else if (entity is BaseNpc && !cache.Animals.Contains(entity as BaseNpc))
+                else if (entity is BaseNpc || entity is SimpleShark)
                 {
-                    cache.Animals.Add(entity as BaseNpc);
-                    return True;
+                    if (!cache.Animals.Contains(entity))
+                    {
+                        cache.Animals.Add(entity);
+                        return True;
+                    }
                 }
                 else if (entity is BasePlayer)
                 {
@@ -2898,11 +2985,13 @@ namespace Oxide.Plugins
 
                 return False;
             }
-            else if (trackBags && entity is SleepingBag)
+            else if (trackBags && entity is SleepingBag) // && !(entity is SleepingBagCamper))
             {
-                if (!cache.Bags.ContainsKey(position))
+                cache.Bags.RemoveAll(bag => bag == null || bag.IsDestroyed);
+
+                if (!cache.Bags.Contains(entity) && !cache.Bags.Exists(bag => bag.Distance(entity) < 0.2f))
                 {
-                    cache.Bags.Add(position, new CachedInfo { Size = 0.5f });
+                    cache.Bags.Add(entity);
                     return True;
                 }
 
@@ -3027,12 +3116,12 @@ namespace Oxide.Plugins
                 cache.Containers.Remove(entity as StorageContainer);
             else if (cache.Collectibles.ContainsKey(position))
                 cache.Collectibles.Remove(position);
-            else if (entity is BaseNpc)
-                cache.Animals.Remove(entity as BaseNpc);
+            else if (entity is BaseNpc || entity is SimpleShark)
+                cache.Animals.Remove(entity);
             else if (entity is PlayerCorpse)
                 cache.Corpses.Remove(entity as PlayerCorpse);
-            else if (cache.Bags.ContainsKey(position))
-                cache.Bags.Remove(position);
+            else if (cache.Bags.Contains(entity))
+                cache.Bags.Remove(entity);
             else if (entity is DroppedItemContainer)
                 cache.Backpacks.Remove(entity as DroppedItemContainer);
             else if (entity is BaseHelicopter)
@@ -3161,6 +3250,11 @@ namespace Oxide.Plugins
                     case "buildings":
                         {
                             DrawBuildings(player);
+                        }
+                        return;
+                    case "findbyid":
+                        {
+                            FindByID(player, args);
                         }
                         return;
                     case "ext":
@@ -3459,6 +3553,60 @@ namespace Oxide.Plugins
             return False;
         }
 
+        private void FindByID(BasePlayer player, string[] args)
+        {
+            if (args.Length != 2)
+            {
+                return;
+            }
+            
+            ulong userID;
+            if (!ulong.TryParse(args[1], out userID))
+            {
+                return;
+            }
+
+            bool isAdmin = player.IsAdmin;
+
+            try
+            {
+                if (!isAdmin)
+                {
+                    player.SetPlayerFlag(BasePlayer.PlayerFlags.IsAdmin, true);
+                    player.SendNetworkUpdateImmediate();
+                }
+
+                foreach (var building in BuildingManager.server.buildingDictionary.Values)
+                {                    
+                    if (building.HasBuildingPrivileges())
+                    {
+                        var priv = building.buildingPrivileges.FirstOrDefault(x => x.IsAuthed(userID));
+
+                        if (priv.IsValid())
+                        {
+                            player.SendConsoleCommand("ddraw.text", 180f, Color.red, priv.transform.position, $"{userID} : {priv.buildingID}");
+                            break;
+                        }
+                    }
+                    if (!building.HasBuildingBlocks()) continue;
+                    foreach (var block in building.buildingBlocks)
+                    {
+                        if (block.OwnerID != userID) continue;
+                        player.SendConsoleCommand("ddraw.text", 180f, Color.red, block.transform.position, $"{userID} : {block.buildingID}");
+                        break;
+                    }
+                }
+            }
+            finally
+            {
+                if (!isAdmin)
+                {
+                    player.SetPlayerFlag(BasePlayer.PlayerFlags.IsAdmin, false);
+                    player.SendNetworkUpdateImmediate();
+                }
+            }
+        }
+
         private void DrawBuildings(BasePlayer player)
         {
             bool isAdmin = player.IsAdmin;
@@ -3509,7 +3657,8 @@ namespace Oxide.Plugins
                 foreach (var o in BaseNetworkable.serverEntities.OfType<BaseEntity>())
                 {
                     if (!o.ShortPrefabName.Contains(value, CompareOptions.OrdinalIgnoreCase)) continue;
-                    player.SendConsoleCommand("ddraw.text", 180f, Color.red, o.transform.position, o.ShortPrefabName);
+                    var distance = Mathf.FloorToInt(o.Distance(player));
+                    player.SendConsoleCommand("ddraw.text", 180f, Color.red, o.transform.position, $"{o.ShortPrefabName} {distance}");
                 }
             }
             finally
@@ -3757,25 +3906,24 @@ namespace Oxide.Plugins
                 container.Add(new CuiButton
                 {
                     Button =
-                        {
-                            Color = color,
-                            Command = command,
-                            FadeIn = 1.0f
-                        },
+                    {
+                        Color = color,
+                        Command = command,
+                        FadeIn = 1.0f
+                    },
                     RectTransform =
-                        {
-                            AnchorMin = aMin,
-                            AnchorMax = aMax
-                        },
+                    {
+                        AnchorMin = aMin,
+                        AnchorMax = aMax
+                    },
                     Text =
-                        {
-                            Text = text,
-                            FontSize = size,
-                            Align = align,
-                            Color = labelColor
-                        }
-                },
-                    panel);
+                    {
+                        Text = text,
+                        FontSize = size,
+                        Align = align,
+                        Color = labelColor
+                    }
+                }, panel);
             }
         }
 
@@ -3855,7 +4003,6 @@ namespace Oxide.Plugins
         private static string zombieCC;
         private static string scientistCC;
         private static string peacekeeperCC;
-        private static string htnscientistCC;
         private static string murdererCC;
         private static string npcCC;
         private static string resourceCC;
@@ -3960,6 +4107,8 @@ namespace Oxide.Plugins
         private string _discordMessageToggleOn;
         private string _discordMessageToggleOff;
         private bool showToggleMessage;
+        private bool trackBackpacks;
+        private static List<Cache.CacheInfo> cis = new List<Cache.CacheInfo>();
 
         private List<object> ItemExceptions
         {
@@ -4070,7 +4219,6 @@ namespace Oxide.Plugins
                 ["Help8"] = "<color=#FFA500>/{0} {1}</color> - Toggles extended information for players.",
                 ["backpack"] = "backpack",
                 ["scientist"] = "scientist",
-                ["npc"] = "npc",
                 ["NoDrops"] = "No item drops found within {0}m",
                 ["Help9"] = "<color=#FFA500>/{0} drops</color> - Show all dropped items within {1}m.",
                 ["Zombie"] = "<color=#FF0000>Zombie</color>",
@@ -4082,18 +4230,17 @@ namespace Oxide.Plugins
                 ["Collectibles"] = "Collectibles",
                 ["Dead"] = "Dead",
                 ["Loot"] = "Loot",
-                ["NPC"] = "NPC",
                 ["Ore"] = "Ore",
                 ["Sleepers"] = "Sleepers",
                 ["Stash"] = "Stash",
                 ["TC"] = "TC",
                 ["Turrets"] = "Turrets",
-                ["bear"] = "Bear",
-                ["boar"] = "Boar",
-                ["chicken"] = "Chicken",
-                ["wolf"] = "Wolf",
-                ["stag"] = "Stag",
-                ["horse"] = "Horse",
+                ["Bear"] = "Bear",
+                ["Boar"] = "Boar",
+                ["Chicken"] = "Chicken",
+                ["Wolf"] = "Wolf",
+                ["Stag"] = "Stag",
+                ["Horse"] = "Horse",
                 ["My Base"] = "My Base",
                 ["scarecrow"] = "scarecrow",
                 ["murderer"] = "murderer",
@@ -4103,6 +4250,22 @@ namespace Oxide.Plugins
                 ["CantHurtNpcs"] = "You can't hurt npcs while using radar",
                 ["CantHurtOther"] = "You can't hurt this while using radar",
                 ["WaitCooldown"] = "You must wait {0} seconds to use this command again.",
+                ["missionprovider_stables_a"] = "missions",
+                ["missionprovider_stables_b"] = "missions",
+                ["missionprovider_outpost_a"] = "missions",
+                ["missionprovider_outpost_b"] = "missions",
+                ["missionprovider_fishing_a"] = "missions",
+                ["missionprovider_fishing_b"] = "missions",
+                ["missionprovider_bandit_a"] = "missions",
+                ["missionprovider_bandit_b"] = "missions",
+                ["simpleshark"] = "shark",
+                ["stables_shopkeeper"] = "shopkeeper",
+                ["npc_underwaterdweller"] = "dweller",
+                ["boat_shopkeeper"] = "shopkeeper",
+                ["bandit_shopkeeper"] = "shopkeeper",
+                ["outpost_shopkeeper"] = "shopkeeper",
+                ["npc_bandit_guard"] = "guard",
+                ["bandit_conversationalist"] = "vendor",
             }, this);
         }
 
@@ -4204,6 +4367,7 @@ namespace Oxide.Plugins
             trackRigidHullInflatableBoats = Convert.ToBoolean(GetConfig("Additional Tracking", "RHIB", False));
             trackBoats = Convert.ToBoolean(GetConfig("Additional Tracking", "Boats", False));
             trackCCTV = Convert.ToBoolean(GetConfig("Additional Tracking", "CCTV", False));
+            trackBackpacks = Convert.ToBoolean(GetConfig("Additional Tracking", "Backpacks Plugin", False));
 
             colorDrawArrows = Convert.ToString(GetConfig("Color-Hex Codes", "Player Arrows", "#000000"));
             distCC = Convert.ToString(GetConfig("Color-Hex Codes", "Distance", "#ffa500"));
@@ -4222,7 +4386,6 @@ namespace Oxide.Plugins
             zombieCC = Convert.ToString(GetConfig("Color-Hex Codes", "Zombies", "#ff0000"));
             scientistCC = Convert.ToString(GetConfig("Color-Hex Codes", "Scientists", "#ffff00"));
             peacekeeperCC = Convert.ToString(GetConfig("Color-Hex Codes", "Scientist Peacekeeper", "#ffff00"));
-            htnscientistCC = Convert.ToString(GetConfig("Color-Hex Codes", "Scientist HTN", "#ff00ff"));
             murdererCC = Convert.ToString(GetConfig("Color-Hex Codes", "Murderers", "#000000"));
             npcCC = Convert.ToString(GetConfig("Color-Hex Codes", "Animals", "#0000ff"));
             resourceCC = Convert.ToString(GetConfig("Color-Hex Codes", "Resources", "#ffff00"));

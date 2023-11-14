@@ -15,16 +15,9 @@ using Oxide.Game.Rust.Cui;
 using Rust;
 using UnityEngine;
 
-/*
-    Removed reflection for newly exposed numViewers
-    Fixed infinite loop when using Performance Mode
-    Added DiscordMessages support to config. Made possible by Corvezeo
-    Added `Show Radar Activated/Deactivated Messages` true
-*/
-
 namespace Oxide.Plugins
 {
-    [Info("Admin Radar", "nivex", "5.0.4")]
+    [Info("Admin Radar", "nivex", "5.0.5")]
     [Description("Radar tool for Admins and Developers.")]
     class AdminRadar : RustPlugin
     {
@@ -226,6 +219,11 @@ namespace Oxide.Plugins
 
         private void AdminRadarDiscordMessage(string playerName, string playerId, bool state, Vector3 position)
         {
+            if (!_sendDiscordMessages || DiscordMessages == null || !DiscordMessages.IsLoaded)
+            {
+                return;
+            }
+
             string text = state ? _discordMessageToggleOn : _discordMessageToggleOff;
             string grid = PositionToGrid(position);
             string message = $"[{DateTime.Now}] {playerName} ({playerId} @ {grid}): {text}";
@@ -240,11 +238,6 @@ namespace Oxide.Plugins
 
             LogToFile("toggles", message, this, false);
             RCon.Broadcast(RCon.LogType.Chat, chatEntry);
-
-            if (!_sendDiscordMessages || DiscordMessages == null || !DiscordMessages.IsLoaded)
-            {
-                return;
-            }
 
             string steam = $"[{playerName}](https://steamcommunity.com/profiles/{playerId})";
             string server = $"steam://connect/{ConVar.Server.ip}:{ConVar.Server.port}";
@@ -3096,6 +3089,7 @@ namespace Oxide.Plugins
 
             for (int x = 0; x < buttonNames.Length; x++)
             {
+                if (!buttons.ContainsKey(x) || !buttons[x].ContainsKey("Anchor") || !buttons[x].ContainsKey("Offset")) continue;
                 UI.CreateButton(ref element, UI_PanelName, esp.GetBool(buttonNames[x]) ? uiColorOn : uiColorOff, msg(buttonNames[x], player.UserIDString), fontSize, buttons[x]["Anchor"], buttons[x]["Offset"], "espgui " + buttonNames[x]);
             }
 

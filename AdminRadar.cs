@@ -16,16 +16,15 @@ using Rust;
 using UnityEngine;
 
 /*
-    Fixed for Rust update
-    Fixed boat and horse filters UI
-    Prevent discord messages during plugin reload
-    Radar is no longer automatically activated for users when the plugin loads, unless radar was activated prior to the unload
-    - Users that want radar activated automatically must use the adminradar.auto permission
+    Fixed boat, rhib, and horse tracking
+    Added modular cars to Cars filter
+    Added LockedByEntCrate to Loot filter (bradley apc crate)
+    Added `Drawing Distances > Radar Drops Command` (150 meters) - /radar drops
 */
 
 namespace Oxide.Plugins
 {
-    [Info("Admin Radar", "nivex", "5.0.9")]
+    [Info("Admin Radar", "nivex", "5.1.0")]
     [Description("Radar tool for Admins and Developers.")]
     class AdminRadar : RustPlugin
     {
@@ -36,8 +35,6 @@ namespace Oxide.Plugins
         private const string permAuto = "adminradar.auto";
         private const string permBypassOverride = "adminradar.bypass.override";
         private const string permList = "adminradar.list";
-        private const string genericPrefab = "assets/prefabs/tools/map/genericradiusmarker.prefab";
-        private const string vendingPrefab = "assets/prefabs/deployable/vendingmachine/vending_mapmarker.prefab";
         private const float flickerDelay = 0.05f;
         private static AdminRadar ins;
         private StoredData storedData = new StoredData();
@@ -65,6 +62,20 @@ namespace Oxide.Plugins
             Authorize,
             Clear,
             Deauthorize
+        }
+
+        public class TrackType
+        {
+            public string ExactShortname;
+            public string PartialShortname;
+            public string Text;
+
+            public TrackType(string exact, string partial, string text)
+            {
+                ExactShortname = exact;
+                PartialShortname = partial;
+                Text = text;
+            }
         }
 
         private class CachedStringBuilder
@@ -498,6 +509,7 @@ namespace Oxide.Plugins
                         return showHeli;
                     case "Horse":
                     case "Horses":
+                    case "RidableHorses":
                         return showRidableHorses;
                     case "Loot":
                         return showLoot;
@@ -507,8 +519,6 @@ namespace Oxide.Plugins
                         return showNPC;
                     case "Ore":
                         return showOre;
-                    case "RidableHorses":
-                        return showRidableHorses;
                     case "RHIB":
                         return showRHIB;
                     case "Sleepers":
@@ -1271,7 +1281,7 @@ namespace Oxide.Plugins
             {
                 try
                 {
-                    if (!barebonesMode && showTCArrow && uiBtnTCArrow && uiBtnTC)
+                    if (showTCArrow && uiBtnTCArrow && uiBtnTC)
                     {
                         entityType = EntityType.CupboardsArrow;
                         var nearest = GetNearestCupboard(target);
@@ -1613,8 +1623,8 @@ namespace Oxide.Plugins
                                 continue;
                         }
 
-                        string colorHex = isBox ? boxCC : isLoot ? lootCC : stashCC;
-
+                        string colorHex = container is LockedByEntCrate ? heliCC : isBox ? boxCC : isLoot ? lootCC : stashCC;
+                        
                         if (ins.storedData.OnlineBoxes.Contains(player.UserIDString) && container.OwnerID.IsSteamId() && (container.name.Contains("box") || container.name.Contains("coffin")))
                         {
                             var owner = BasePlayer.FindByID(container.OwnerID);
@@ -1951,7 +1961,12 @@ namespace Oxide.Plugins
 
                             currDistance = (e.transform.position - source.transform.position).magnitude;
 
-                            if (entityType == EntityType.Boats || entityType == EntityType.RigidHullInflatableBoats)
+                            if (entityType == EntityType.Boats)
+                            {
+                                if (currDistance > boatDistance) continue;
+                                if (!trackBoats && !uiBtnBoats) continue;
+                            }
+                            else if (entityType == EntityType.RigidHullInflatableBoats)
                             {
                                 if (currDistance > boatDistance) continue;
                                 if (!trackRigidHullInflatableBoats && !uiBtnRHIB) continue;
@@ -1975,8 +1990,8 @@ namespace Oxide.Plugins
 
                             if (e is ScrapTransportHelicopter) entityName = "STH";
                             string info = e.Health() <= 0 ? entityName : string.Format("{0} <color={1}>{2}</color>", entityName, healthCC, e.Health() > 1000 ? Math.Floor(e.Health()).ToString("#,##0,K", CultureInfo.InvariantCulture) : Math.Floor(e.Health()).ToString("#0"));
-                            Color color = e is ScrapTransportHelicopter ? __(scrapCC) : e is MiniCopter ? __(miniCC) : __(bradleyCC);
-
+                            Color color = e is ScrapTransportHelicopter ? __(scrapCC) : e is MiniCopter ? __(miniCC) : e is ModularCar ? Color.magenta : __(bradleyCC);
+                            
                             DrawText(color, e.transform.position + new Vector3(0f, 2f, 0f), string.Format("{0} <color={1}>{2}</color>", info, distCC, currDistance.ToString("0")));
                             DrawBox(color, e.transform.position + new Vector3(0f, 1f, 0f), GetScale(currDistance));
                             checks++;
@@ -2167,7 +2182,7 @@ namespace Oxide.Plugins
             {
                 if (storedData.Active.Contains(player.UserIDString))
                 {
-                    RadarCommand(player, "radar", storedData.Filters.ContainsKey(player.UserIDString) ? storedData.Filters[player.UserIDString].ToArray() : new string[0]);
+                    RadarCommandX(player, "radar", storedData.Filters.ContainsKey(player.UserIDString) ? storedData.Filters[player.UserIDString].ToArray() : new string[0]);
                 }
             }
         }
@@ -2191,7 +2206,7 @@ namespace Oxide.Plugins
 
             if (player.IsValid() && player.IsConnected && player.GetComponent<Radar>() == null && permission.UserHasPermission(player.UserIDString, permAuto))
             {
-                RadarCommand(player, "radar", new string[0]);
+                RadarCommandX(player, "radar", new string[0]);
             }
 
             if (showUI && !barebonesMode)
@@ -2447,7 +2462,15 @@ namespace Oxide.Plugins
 
             if (trackNPC && entity.IsNpc)
             {
-                if (entity is BaseNpc && !cache.Animals.Contains(entity as BaseNpc))
+                if (trackRidableHorses && entity is RidableHorse)
+                {
+                    if (!cache.RidableHorse.Contains(entity))
+                    {
+                        cache.RidableHorse.Add(entity);
+                        return True;
+                    }
+                }
+                else if (entity is BaseNpc && !cache.Animals.Contains(entity as BaseNpc))
                 {
                     cache.Animals.Add(entity as BaseNpc);
                     return True;
@@ -2489,7 +2512,7 @@ namespace Oxide.Plugins
                     cache.SupplyDrops.Add(entity as SupplyDrop);
                     return True;
                 }
-                else if (IsBox(entity.ShortPrefabName) || IsLoot(entity.ShortPrefabName))
+                else if (IsBox(entity.ShortPrefabName) || IsLoot(entity.ShortPrefabName) || entity is LockedByEntCrate)
                 {
                     if (!cache.Containers.Contains(entity as StorageContainer))
                     {
@@ -2592,14 +2615,6 @@ namespace Oxide.Plugins
                     return True;
                 }
             }
-            else if (trackRidableHorses && entity is RidableHorse)
-            {
-                if (!cache.RidableHorse.Contains(entity))
-                {
-                    cache.RidableHorse.Add(entity);
-                    return True;
-                }
-            }
             else if (trackRigidHullInflatableBoats && entity is RHIB)
             {
                 if (!cache.RHIB.Contains(entity))
@@ -2608,19 +2623,19 @@ namespace Oxide.Plugins
                     return True;
                 }
             }
+            else if (trackBoats && entity is BaseBoat && !(entity is RHIB))
+            {
+                if (!cache.Boats.Contains(entity))
+                {
+                    cache.Boats.Add(entity);
+                    return True;
+                }
+            }
             else if (entity is MiniCopter)
             {
                 if (!cache.MiniCopter.Contains(entity))
                 {
                     cache.MiniCopter.Add(entity);
-                    return True;
-                }
-            }
-            else if (trackBoats && entity is BaseBoat)
-            {
-                if (!cache.Boats.Contains(entity))
-                {
-                    cache.Boats.Add(entity);
                     return True;
                 }
             }
@@ -2640,7 +2655,7 @@ namespace Oxide.Plugins
                     return True;
                 }
             }
-            else if (trackCars && entity is BasicCar)
+            else if (trackCars && (entity is BasicCar || entity is ModularCar))
             {
                 if (!cache.Cars.Contains(entity))
                 {
@@ -2711,7 +2726,7 @@ namespace Oxide.Plugins
                 cache.Zombies.Remove(entity as Zombie);
             else if (entity is CargoShip)
                 cache.CargoShips.Remove(entity);
-            else if (entity is BasicCar)
+            else if (entity is BasicCar || entity is ModularCar)
                 cache.Cars.Remove(entity);
             else if (entity is CH47Helicopter)
                 cache.CH47.Remove(entity);
@@ -2760,7 +2775,7 @@ namespace Oxide.Plugins
             if (!player)
                 return;
 
-            RadarCommand(player, "espgui", arg.Args);
+            RadarCommandX(player, "espgui", arg.Args);
         }
 
         private void RadarCommand(IPlayer p, string command, string[] args)
@@ -2773,10 +2788,10 @@ namespace Oxide.Plugins
                 return;
             }
 
-            RadarCommand(player, command, args);
+            RadarCommandX(player, command, args);
         }
 
-        private void RadarCommand(BasePlayer player, string command, string[] args)
+        private void RadarCommandX(BasePlayer player, string command, string[] args)
         {
             if (args.Length == 1 && args[0].ToLower() == "list" && permission.UserHasPermission(player.UserIDString, permList))
             {
@@ -2816,7 +2831,7 @@ namespace Oxide.Plugins
                                     string shortname = drop?.item?.info.shortname ?? entity.ShortPrefabName;
                                     currDistance = (entity.transform.position - player.transform.position).magnitude;
 
-                                    if (currDistance < lootDistance)
+                                    if (currDistance <= dropsDistance)
                                     {
                                         if (drawText) player.SendConsoleCommand("ddraw.text", 30f, Color.red, entity.transform.position, string.Format("{0} <color=#FFFF00>{1}</color>", shortname, currDistance.ToString("0")));
                                         if (drawBox) player.SendConsoleCommand("ddraw.box", 30f, Color.red, entity.transform.position, 0.25f);
@@ -3386,6 +3401,7 @@ namespace Oxide.Plugins
         private static float bagDistance;
         private static float npcDistance;
         private static float turretDistance;
+        private static float dropsDistance;
         private static bool showLootContents;
         private static bool showAirdropContents;
         private static bool showStashContents;
@@ -3739,6 +3755,7 @@ namespace Oxide.Plugins
             tcDistance = Convert.ToSingle(GetConfig("Drawing Distances", "Tool Cupboards", 150));
             tcArrowsDistance = Convert.ToSingle(GetConfig("Drawing Distances", "Tool Cupboard Arrows", 250));
             turretDistance = Convert.ToSingle(GetConfig("Drawing Distances", "Turrets", 100));
+            dropsDistance = Convert.ToSingle(GetConfig("Drawing Distances", "Radar Drops Command", 150f));
 
             trackBradley = Convert.ToBoolean(GetConfig("Additional Tracking", "Bradley APC", True));
             trackCars = Convert.ToBoolean(GetConfig("Additional Tracking", "Cars", False));

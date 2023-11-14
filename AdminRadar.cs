@@ -17,11 +17,7 @@ using Rust;
 using UnityEngine;
 
 /*
-Fixed NPC detection
-Fixed Plane Crash detection
-Added options for MLRS detection
-NPC using melee weapons will now use `Color-Hex Codes => Murderers`
-Updated `/radar findbyid steamid` to find all owned/authed entities
+Fixed ShowActive().NullReferenceException
 */
 
 // make all entities dynamic and where they can be assigned to any filter or their own
@@ -33,7 +29,7 @@ Updated `/radar findbyid steamid` to find all owned/authed entities
 
 namespace Oxide.Plugins
 {
-    [Info("Admin Radar", "nivex", "5.1.6")]
+    [Info("Admin Radar", "nivex", "5.1.7")]
     [Description("Radar tool for Admins and Developers.")]
     class AdminRadar : RustPlugin
     {
@@ -1267,7 +1263,7 @@ namespace Oxide.Plugins
                 {
                     foreach (var target in BasePlayer.activePlayerList)
                     {
-                        if (target == null || target.IPlayer == null || !target.IsConnected || list.Contains(target.userID))
+                        if (target == null || target.transform == null || target.IPlayer == null || !target.IsConnected || list.Contains(target.userID))
                         {
                             continue;
                         }
@@ -1300,31 +1296,34 @@ namespace Oxide.Plugins
                             {
                                 Item item = target.GetActiveItem();
 
-                                _cachedStringBuilder.Append(item.info.displayName.translated);
-                                var itemList = item.contents?.itemList;
-
-                                if (itemList?.Count > 0)
+                                if (item != null)
                                 {
-                                    _cachedStringBuilder.Append(" (");
+                                    _cachedStringBuilder.Append(item.info.displayName.translated);
+                                    var itemList = item.contents?.itemList;
 
-                                    for (int index = 0; index < itemList.Count; index++)
+                                    if (itemList?.Count > 0)
                                     {
-                                        _cachedStringBuilder.Append(itemList[index].info.displayName.translated);
-                                        _cachedStringBuilder.Append("|");
-                                    }
+                                        _cachedStringBuilder.Append(" (");
 
-                                    _cachedStringBuilder.Replace("Weapon ", "");
-                                    _cachedStringBuilder.Replace("Simple Handmade ", "");
-                                    _cachedStringBuilder.Replace("Muzzle ", "");
-                                    _cachedStringBuilder.Replace("4x Zoom Scope", "4x");
-                                    _cachedStringBuilder.Append(")");
+                                        for (int index = 0; index < itemList.Count; index++)
+                                        {
+                                            _cachedStringBuilder.Append(itemList[index].info.displayName.translated);
+                                            _cachedStringBuilder.Append("|");
+                                        }
+
+                                        _cachedStringBuilder.Replace("Weapon ", "");
+                                        _cachedStringBuilder.Replace("Simple Handmade ", "");
+                                        _cachedStringBuilder.Replace("Muzzle ", "");
+                                        _cachedStringBuilder.Replace("4x Zoom Scope", "4x");
+                                        _cachedStringBuilder.Append(")");
+                                    }
                                 }
                             }
 
                             if (averagePingInterval > 0)
                             {
                                 _cachedStringBuilder.Append(" ");
-                                _cachedStringBuilder.Append(target.IPlayer?.Ping ?? -1);
+                                _cachedStringBuilder.Append(target.IPlayer.Ping);
                                 _cachedStringBuilder.Append("ms");
                             }
 
@@ -3604,7 +3603,7 @@ namespace Oxide.Plugins
                     {
                         player.SendConsoleCommand("ddraw.text", 180f, Color.cyan, e.transform.position, userID);
                     }
-                    else if (e.OwnerID == userID || e is CodeLock && (e as CodeLock).whitelistPlayers.Contains(userID))
+                    else if (e?.OwnerID == userID || e is CodeLock && (e as CodeLock).whitelistPlayers.Contains(userID))
                     {
                         player.SendConsoleCommand("ddraw.text", 180f, Color.red, e.transform.position, userID);
                     }

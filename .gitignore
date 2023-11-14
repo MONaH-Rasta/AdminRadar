@@ -1,0 +1,9 @@
+#Files
+*.csproj
+*.sln
+
+#Folders
+/obj
+/bin
+/.vscode
+/.tmp

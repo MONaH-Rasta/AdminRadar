@@ -18,7 +18,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("Admin Radar", "nivex", "5.1.9")]
+    [Info("Admin Radar", "nivex", "5.1.10")]
     [Description("Radar tool for Admins and Developers.")]
     class AdminRadar : RustPlugin
     {
@@ -2155,8 +2155,8 @@ namespace Oxide.Plugins
 
                         if (currDistance < cctvDistance && currDistance < maxDistance)
                         {
-                            string info = string.Format("<color={0}>{1}</color> {2}", distCC, currDistance.ToString("0"), cctv.numViewers);
-                            var color = cctv.HasFlag(BaseEntity.Flags.Reserved5) ? Color.green : cctv.CanControl() ? Color.cyan : Color.red;
+                            string info = string.Format("<color={0}>{1}</color> {2}", distCC, currDistance.ToString("0"), cctv.ViewerCount);
+                            var color = cctv.HasFlag(BaseEntity.Flags.Reserved5) ? Color.green : cctv.CanControl(player.userID) ? Color.cyan : Color.red;
                             DrawText(color, cctv.transform.position + new Vector3(0f, 0.3f, 0f), "CCTV", info);
                             DrawBox(color, cctv.transform.position, 0.25f);
                             checks++;

@@ -7,27 +7,25 @@ using System.Text.RegularExpressions;
 using Oxide.Core;
 using Oxide.Core.Plugins;
 using Oxide.Game.Rust.Cui;
+using Rust;
 using UnityEngine;
 using Random = UnityEngine.Random;
 
 /*
     TODO: Adjust anchors if InfoPanel is installed and anchors are default values @?
 
-    Changes 4.7.0:
-    Major performance improvements (removal of CanNetworkTo hook, etc)
-    Fixed some AutoTurrets not being shown after a prior Rust update
-    Fixed NRE in Radar.OnDestroy
-    Updated to support Vanish 1.0+
-    Config will automatically convert to new hex values
-    Appended protected minutes to TC filter (updated every 60 seconds)
-    Added support for CargoPlanes (default: disabled)
-    Added 'Show Average Ping Every X Seconds [0 = disabled]' (default: 0) @squirrelof09
-    Removed Map Markers functionality entirely
+    Changes 4.7.1:
+    Added When Radar Is Active -> Block Damage To Animals (false) @clarksta
+    Added When Radar Is Active -> Block Damage To Buildings (false) @clarksta
+    Added When Radar Is Active -> Block Damage To Npcs (false) @clarksta
+    Added When Radar Is Active -> Block Damage To Players (false) @clarksta
+    Added When Radar Is Active -> Block Damage To Everything Else (false)
+    Added Settings > Re-use Cooldown, Seconds (0) @clarksta
 */
 
 namespace Oxide.Plugins
 {
-    [Info("Admin Radar", "nivex", "4.7.0")]
+    [Info("Admin Radar", "nivex", "4.7.2")]
     [Description("Radar tool for Admins and Developers.")]
     public class AdminRadar : RustPlugin
     {
@@ -43,6 +41,7 @@ namespace Oxide.Plugins
         private static AdminRadar ins;
         private StoredData storedData = new StoredData();
         private bool init; // don't use cache while false
+        private static bool isUnloading;
 
         private static readonly List<string> tags = new List<string>
             {"ore", "cluster", "1", "2", "3", "4", "5", "6", "_", ".", "-", "deployed", "wooden", "large", "pile", "prefab", "collectable", "loot", "small"}; // strip these from names to reduce the size of the text and make it more readable
@@ -51,7 +50,9 @@ namespace Oxide.Plugins
         private readonly List<BasePlayer> accessList = new List<BasePlayer>();
         private readonly Dictionary<ulong, Timer> voices = new Dictionary<ulong, Timer>();
         private readonly List<Radar> activeRadars = new List<Radar>();
+        private readonly List<ulong> warnings = new List<ulong>();
 
+        private static readonly Dictionary<ulong, float> cooldowns = new Dictionary<ulong, float>();
         private static readonly Dictionary<ulong, SortedDictionary<float, Vector3>> trackers = new Dictionary<ulong, SortedDictionary<float, Vector3>>(); // player id, timestamp and player's position
         private static readonly Dictionary<ulong, Timer> trackerTimers = new Dictionary<ulong, Timer>();
         private static Cache cache = new Cache();
@@ -265,6 +266,12 @@ namespace Oxide.Plugins
             private void Awake()
             {
                 ins.activeRadars.Add(this);
+
+                if (ins.activeRadars.Count == 1 && (blockDamageAnimals || blockDamageBuildings || blockDamageNpcs || blockDamagePlayers || blockDamageOther))
+                {
+                    ins.Subscribe(nameof(OnEntityTakeDamage));
+                }
+
                 player = GetComponent<BasePlayer>();
                 source = player;
                 position = player.transform.position;
@@ -291,7 +298,21 @@ namespace Oxide.Plugins
                 pings.Clear();
                 CancelInvoke(DoRadar);
                 ins.activeRadars.Remove(this);
-                if (player != null && player.IsConnected) player.ChatMessage(ins.msg("Deactivated", player.UserIDString));
+
+                if (ins.activeRadars.Count == 0 && !isUnloading) ins.Unsubscribe(nameof(OnEntityTakeDamage));
+
+                if (player != null && player.IsConnected)
+                {
+                    if (coolDown > 0f)
+                    {
+                        if (!cooldowns.ContainsKey(player.userID))
+                            cooldowns.Add(player.userID, Time.realtimeSinceStartup + coolDown);
+                        else cooldowns[player.userID] = Time.realtimeSinceStartup + coolDown;
+                    }
+
+                    player.ChatMessage(ins.msg("Deactivated", player.UserIDString));
+                }
+
                 Destroy(this);
             }
 
@@ -833,7 +854,7 @@ namespace Oxide.Plugins
                             }
                         }
 
-                        string vanished = ins.Vanish != null && target.IPlayer.HasPermission("vanish.allow") && ins.Vanish.Call<bool>("IsInvisible", target) ? "<color=#FF00FF>V</color>" : string.Empty;
+                        string vanished = ins.Vanish != null && ins.Vanish.Call<bool>("IsInvisible", target) ? "<color=#FF00FF>V</color>" : string.Empty;
                         string health = showHT && target.metabolism != null ? string.Format("{0} <color=#FFA500>{1}</color>:<color=#FFADD8E6>{2}</color>", Math.Floor(target.health), target.metabolism.calories.value.ToString("#0"), target.metabolism.hydration.value.ToString("#0")) : Math.Floor(target.health).ToString("#0");
                         
                         if (averagePingInterval > 0) extText += string.Format(" {0}ms", GetAveragePing(target));
@@ -1586,6 +1607,7 @@ namespace Oxide.Plugins
         private void Init()
         {
             ins = this;
+            Unsubscribe(nameof(OnEntityTakeDamage));
             Unsubscribe(nameof(OnEntityDeath));
             Unsubscribe(nameof(OnEntityKill));
             Unsubscribe(nameof(OnEntitySpawned));
@@ -1707,6 +1729,7 @@ namespace Oxide.Plugins
 
         private void Unload()
         {
+            isUnloading = true;
             Interface.Oxide.DataFileSystem.WriteObject(Name, storedData);
 
             var radarObjects = UnityEngine.Object.FindObjectsOfType(typeof(Radar));
@@ -1749,6 +1772,110 @@ namespace Oxide.Plugins
             authorized.Clear();
             itemExceptions.Clear();
             groupColors.Clear();
+            cooldowns.Clear();
+        }
+
+        private void Warn(BasePlayer player, string message)
+        {
+            ulong playerId = player.userID;
+
+            if (!warnings.Contains(playerId))
+            {
+                player.ChatMessage(msg(message, player.UserIDString));
+                warnings.Add(playerId);
+                timer.Once(5f, () => warnings.Remove(playerId));
+            }
+        }
+
+        private object OnEntityTakeDamage(BaseCombatEntity entity, HitInfo info)
+        {
+            var attacker = info?.Initiator as BasePlayer;
+            
+            if (attacker == null || !attacker.IsConnected)
+            {
+                return null;
+            }
+
+            // Check if player is using radar
+            if (!IsRadar(attacker.UserIDString))
+            {
+                return null;
+            }
+
+            // Block damage to animals
+            if (entity is BaseNpc)
+            {
+                if (blockDamageAnimals)
+                {
+                    Warn(attacker, "CantHurtAnimals");
+                    info.damageTypes = new DamageTypeList();
+                    info.DidHit = false;
+                    info.HitEntity = null;
+                    info.Initiator = null;
+                    info.DoHitEffects = false;
+                    info.HitMaterial = 0;
+                    return true;
+                }
+                else return null;
+            }
+
+            // Block damage to buildings
+            if (entity is BuildingBlock)
+            {
+                if (blockDamageBuildings)
+                {
+                    Warn(attacker, "CantDamageBuilds");
+                    return true;
+                }
+                else return null;
+            }
+
+            bool targetIsPlayer = entity?.ToPlayer()?.userID.IsSteamId() ?? false;
+
+            // Block damage to players
+            if (targetIsPlayer)
+            {
+                if (blockDamagePlayers)
+                {
+                    Warn(attacker, "CantHurtPlayers");
+                    info.damageTypes = new Rust.DamageTypeList();
+                    info.HitMaterial = 0;
+                    info.PointStart = Vector3.zero;
+                    return true;
+                }
+                else return null;
+            }
+
+            // Block damage to all other npcs
+            if (entity.IsNpc)
+            {
+                if (blockDamageNpcs)
+                {
+                    Warn(attacker, "CantHurtNpcs");
+                    info.damageTypes = new DamageTypeList();
+                    info.DidHit = false;
+                    info.HitEntity = null;
+                    info.Initiator = null;
+                    info.DoHitEffects = false;
+                    info.HitMaterial = 0;
+                    return true;
+                }
+                else return null;
+            }
+
+            if (blockDamageOther)
+            {
+                Warn(attacker, "CantHurtOther");
+                info.damageTypes = new DamageTypeList();
+                info.DidHit = false;
+                info.HitEntity = null;
+                info.Initiator = null;
+                info.DoHitEffects = false;
+                info.HitMaterial = 0;
+                return true;
+            }
+
+            return null;
         }
 
         private void OnEntityDeath(BaseCombatEntity entity, HitInfo info)
@@ -2336,7 +2463,26 @@ namespace Oxide.Plugins
                 args = storedData.Filters[player.UserIDString].ToArray();
             }
             else
+            {
+                if (coolDown > 0f)
+                {
+                    float time = Time.realtimeSinceStartup;
+
+                    if (cooldowns.ContainsKey(player.userID))
+                    {
+                        float cooldown = cooldowns[player.userID] - time;
+
+                        if (cooldown > 0)
+                        {
+                            player.ChatMessage(msg("WaitCooldown", player.UserIDString, cooldown));
+                            return;
+                        }
+                        else cooldowns.Remove(player.userID);
+                    }
+                }
+
                 storedData.Filters[player.UserIDString] = args.ToList();
+            }
 
             var esp = player.GetComponent<Radar>() ?? player.gameObject.AddComponent<Radar>();
             float invokeTime, maxDistance, outTime, outDistance;
@@ -2755,6 +2901,12 @@ namespace Oxide.Plugins
         private static int voiceInterval;
         private static float voiceDistance;
         private static bool skipUnderworld;
+        private static bool blockDamageBuildings;
+        private static bool blockDamageAnimals;
+        private static bool blockDamagePlayers;
+        private static bool blockDamageNpcs;
+        private static bool blockDamageOther;
+        private static float coolDown;
 
         private List<object> ItemExceptions
         {
@@ -2909,6 +3061,12 @@ namespace Oxide.Plugins
                 ["My Base"] = "My Base",
                 ["scarecrow"] = "scarecrow",
                 ["murderer"] = "murderer",
+                ["CantDamageBuilds"] = "You can't damage buildings while using radar",
+                ["CantHurtAnimals"] = "You can't hurt animals while using radar",
+                ["CantHurtPlayers"] = "You can't hurt players while using radar",
+                ["CantHurtNpcs"] = "You can't hurt npcs while using radar",
+                ["CantHurtOther"] = "You can't hurt this while using radar",
+                ["WaitCooldown"] = "You must wait {0} seconds to use this command again."
             }, this);
         }
 
@@ -2936,6 +3094,13 @@ namespace Oxide.Plugins
             inactiveMinutes = Convert.ToInt32(GetConfig("Settings", "Deactivate Radar After X Minutes", 0));
             showUI = Convert.ToBoolean(GetConfig("Settings", "User Interface Enabled", true));
             averagePingInterval = Convert.ToInt32(GetConfig("Settings", "Show Average Ping Every X Seconds [0 = disabled]", 0));
+            coolDown = Convert.ToSingle(GetConfig("Settings", "Re-use Cooldown, Seconds", 0f));
+
+            blockDamageAnimals = Convert.ToBoolean(GetConfig("When Radar Is Active", "Block Damage To Animals", false));
+            blockDamageBuildings = Convert.ToBoolean(GetConfig("When Radar Is Active", "Block Damage To Buildings", false));
+            blockDamageNpcs = Convert.ToBoolean(GetConfig("When Radar Is Active", "Block Damage To Npcs", false));
+            blockDamagePlayers = Convert.ToBoolean(GetConfig("When Radar Is Active", "Block Damage To Players", false));
+            blockDamageOther = Convert.ToBoolean(GetConfig("When Radar Is Active", "Block Damage To Everything Else", false));
 
             showLootContents = Convert.ToBoolean(GetConfig("Options", "Show Barrel And Crate Contents", false));
             showAirdropContents = Convert.ToBoolean(GetConfig("Options", "Show Airdrop Contents", false));

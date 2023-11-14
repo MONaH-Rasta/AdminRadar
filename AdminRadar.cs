@@ -15,30 +15,14 @@ using Rust;
 using UnityEngine;
 
 /*  
-    Radar now runs in its own coroutine as to not cause any server lag
-    
-        This should also resolve issues for those experiencing rare extreme delays while using radar
-
-    Removed DoESP message from language file as it's no longer used
-
-    Removed `Latency Cap In Milliseconds (0 = no cap)` as it's no longer needed
-
-    Removed `Objects Drawn Limit (0 = unlimited)` as it depends entirely on the users PC
-
-    Removed support for converting old language messages to new hex values - delete your language file if you have issues.
-
-    Changed how messages are sent to radar users to use Player.Message
-
-    Added CCTV filter and options to config (disabled by default)
-        Red = no power / off
-        Cyan = powered on with no viewers
-        Green = powered on with viewers
-        eg. CCTV 55 2 - where 55 is your distance from the CCTV, and 2 is the number of viewers
+    Fixed minicopter tracking
+    Fixed Coroutine continue failure warning message
+    Possible fix for OnPlayerSleepEnded.CreateUI NullReferenceException
 */
 
 namespace Oxide.Plugins
 {
-    [Info("Admin Radar", "nivex", "5.0.2")]
+    [Info("Admin Radar", "nivex", "5.0.3")]
     [Description("Radar tool for Admins and Developers.")]
     class AdminRadar : RustPlugin
     {
@@ -389,11 +373,11 @@ namespace Oxide.Plugins
 
                 if (_routine != null)
                 {
-                    ServerMgr.Instance.StopCoroutine(_routine);
+                    StopCoroutine(_routine);
                     _routine = null;
                 }
 
-                _routine = ServerMgr.Instance.StartCoroutine(DoRadarRoutine());
+                _routine = StartCoroutine(DoRadarRoutine());
             }
 
             bool isAdmin;
@@ -1769,7 +1753,7 @@ namespace Oxide.Plugins
                             else if (entityType == EntityType.CH47Helicopters && !trackCH47 && !uiBtnCH47) continue;
 
                             string info = e.Health() <= 0 ? entityName : string.Format("{0} <color={1}>{2}</color>", entityName, healthCC, e.Health() > 1000 ? Math.Floor(e.Health()).ToString("#,##0,K", CultureInfo.InvariantCulture) : Math.Floor(e.Health()).ToString("#0"));
-
+                            
                             DrawText(__(bradleyCC), e.transform.position + new Vector3(0f, 2f, 0f), string.Format("{0} <color={1}>{2}</color>", info, distCC, currDistance.ToString("0")));
                             DrawBox(__(bradleyCC), e.transform.position + new Vector3(0f, 1f, 0f), GetScale(currDistance));
                             checks++;
@@ -1955,7 +1939,7 @@ namespace Oxide.Plugins
             {
                 if (player != null && player.IsConnected && permission.UserHasPermission(player.UserIDString, permAllowed))
                 {
-                    RadarCommand(player.IPlayer, "radar", new string[0]);
+                    RadarCommand(player, "radar", new string[0]);
                 }
             }
         }
@@ -1972,9 +1956,9 @@ namespace Oxide.Plugins
 
         private void OnPlayerSleepEnded(BasePlayer player)
         {
-            if (player != null && player.IsConnected && player.GetComponent<Radar>() == null && permission.UserHasPermission(player.UserIDString, permAuto) && HasAccess(player))
+            if (player.IsValid() && player.IsConnected && player.GetComponent<Radar>() == null && permission.UserHasPermission(player.UserIDString, permAuto) && HasAccess(player))
             {
-                RadarCommand(player.IPlayer, "radar", new string[0]);
+                RadarCommand(player, "radar", new string[0]);
             }
         }
 
@@ -2367,9 +2351,9 @@ namespace Oxide.Plugins
                     return True;
                 }
             }
-            else if (trackMiniCopter && entity is MiniCopter)
+            else if (entity is MiniCopter)
             {
-                if (cache.MiniCopter.Contains(entity))
+                if (!cache.MiniCopter.Contains(entity))
                 {
                     cache.MiniCopter.Add(entity);
                     return True;
@@ -2519,16 +2503,27 @@ namespace Oxide.Plugins
             if (!player)
                 return;
 
-            RadarCommand(player.IPlayer, "espgui", arg.Args);
+            RadarCommand(player, "espgui", arg.Args);
         }
 
         private void RadarCommand(IPlayer p, string command, string[] args)
         {
-            var player = p?.Object as BasePlayer;
+            var player = p.Object as BasePlayer;
 
             if (!player || !HasAccess(player))
             {
-                p?.Reply(msg("NotAllowed", p.Id));
+                p.Reply(msg("NotAllowed", p.Id));
+                return;
+            }
+
+            RadarCommand(player, command, args);
+        }
+
+        private void RadarCommand(BasePlayer player, string command, string[] args)
+        {
+            if (!HasAccess(player))
+            {
+                Message(player, msg("NotAllowed", player.UserIDString));
                 return;
             }
 
@@ -2923,6 +2918,11 @@ namespace Oxide.Plugins
             for (int x = 0; x < buttonNames.Length; x++)
             {
                 UI.CreateButton(ref element, UI_PanelName, esp.GetBool(buttonNames[x]) ? uiColorOn : uiColorOff, msg(buttonNames[x], player.UserIDString), fontSize, buttons[x]["Anchor"], buttons[x]["Offset"], "espgui " + buttonNames[x]);
+            }
+
+            if (element == null || element.Count == 0)
+            {
+                return;
             }
 
             radarUI.Add(player.UserIDString);

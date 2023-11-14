@@ -30,7 +30,7 @@ Visions will no longer be drawn if the radar user is beyond 150 meters from the 
 
 namespace Oxide.Plugins
 {
-    [Info("Admin Radar", "nivex", "5.1.3")]
+    [Info("Admin Radar", "nivex", "5.1.4")]
     [Description("Radar tool for Admins and Developers.")]
     class AdminRadar : RustPlugin
     {
@@ -2374,7 +2374,7 @@ namespace Oxide.Plugins
             if (teamId.IsSteamId())
             {
                 RelationshipManager.PlayerTeam team;
-                if (!RelationshipManager.Instance.playerToTeam.TryGetValue(teamId, out team))
+                if (!RelationshipManager.ServerInstance.playerToTeam.TryGetValue(teamId, out team))
                 {
                     return null;
                 }
@@ -2449,7 +2449,7 @@ namespace Oxide.Plugins
 
         private void SetupClanTeamColors()
         {
-            foreach (var team in RelationshipManager.Instance.teams)
+            foreach (var team in RelationshipManager.ServerInstance.teams)
             {
                 _teamColors[team.Key] = $"#{Core.Random.Range(0x1000000):X6}";
             }

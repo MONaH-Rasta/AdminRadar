@@ -17,28 +17,13 @@ using Rust;
 using UnityEngine;
 
 /*
-    Fixed StringBuilder.IndexOutOfRangeException
-    Fixed Supply Drop loot not using loot color hex code
-    Fixed npc names not displaying when available
-    Fixed message and title order for Discord Messages
-    Updated grid location for Discord Messages support
-    Added HumanNPC plugin to NPC filter
-    Added Vending Machines to BOX filter (deployed only)
-    Added `Drawing Distances > Vending Machines` (250)
-    Added `Settings > Player Name Text Size` (14)
-    Added `Settings > Player Information Text Size` (14)
-    Added `Settings > Entity Name Text Size` (14)
-    Added `Settings > Entity Information Text Size` (14)
-    Appended players team color to the end of player's information to help identify team mates
-    - This color is randomly chosen for all teams on the server each time the plugin is loaded
-    Appended players clan color to the end of player's information to help identify clan mates
-    - This color is randomly chosen for all clans on the server each time the plugin is loaded
-    Players (authLevel 0) that type `/radar` will now see the message: `Unknown command: radar`
+Clans and teams now update when players create a new clan or team    
+Fixed players being added to NPC list when they respawn by using a delay to check their userID
 */
 
 namespace Oxide.Plugins
 {
-    [Info("Admin Radar", "nivex", "5.1.1")]
+    [Info("Admin Radar", "nivex", "5.1.2")]
     [Description("Radar tool for Admins and Developers.")]
     class AdminRadar : RustPlugin
     {
@@ -2183,11 +2168,16 @@ namespace Oxide.Plugins
 
             coroutine = ServerMgr.Instance.StartCoroutine(FillCache());
 
+            float time = 0f;
+
             foreach (var player in BasePlayer.activePlayerList)
             {
                 if (storedData.Active.Contains(player.UserIDString))
                 {
-                    RadarCommandX(player, "radar", storedData.Filters.ContainsKey(player.UserIDString) ? storedData.Filters[player.UserIDString].ToArray() : new string[0]);
+                    player.Invoke(() =>
+                    {
+                        RadarCommandX(player, "radar", storedData.Filters.ContainsKey(player.UserIDString) ? storedData.Filters[player.UserIDString].ToArray() : new string[0]);
+                    }, time += 0.1f);
                 }
             }
 
@@ -2217,6 +2207,10 @@ namespace Oxide.Plugins
 
             return clan;
         }
+
+        private void OnTeamCreated(BasePlayer player, RelationshipManager.PlayerTeam team) => _teamColors[team.teamID] = $"#{Core.Random.Range(0x1000000):X6}";
+
+        private void OnClanCreate(string tag) => _clanColors[tag] = $"#{Core.Random.Range(0x1000000):X6}";
 
         private void OnClanUpdate(string tag) => UpdateClans(tag);
 
@@ -2255,7 +2249,7 @@ namespace Oxide.Plugins
                     _clanColors[token.ToString()] = $"#{Core.Random.Range(0x1000000):X6}";
                 }
             }
-        }
+        }        
 
         private void OnPlayerConnected(BasePlayer player)
         {
@@ -2562,11 +2556,15 @@ namespace Oxide.Plugins
                 {
                     var player = entity as BasePlayer;
 
-                    if (!player.userID.IsSteamId() && !cache.NPCPlayers.Contains(player))
+                    player.Invoke(() =>
                     {
-                        cache.NPCPlayers.Add(player);
-                        return True;
-                    }
+                        if (!player.IsDestroyed && !player.userID.IsSteamId() && !cache.NPCPlayers.Contains(player))
+                        {
+                            cache.NPCPlayers.Add(player);
+                        }
+                    }, 0.1f);
+
+                    return True;
                 }
                 else if (entity is Zombie && !cache.Zombies.Contains(entity as Zombie))
                 {

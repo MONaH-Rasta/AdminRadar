@@ -17,16 +17,14 @@ using Rust;
 using UnityEngine;
 
 /*
-    Fixed UI bug
-    Fixed ore loot amount using parent
-    Fixed potential NRE in Radar.OnDestroy
-    Fixed supplydrop loot not being displayed when enabled
-    Users with `adminradar.bypass.override` will now see admins and fauxadmin users names colored as `magenta` instead of `green or red` to better track their movement
+    Fixed UI not showing after connecting to the server and waking up
+    Added permission `adminradar.list` - allows players with this permission to use `/radar list`
+    Cleanup of Cache on Unload
 */
 
 namespace Oxide.Plugins
 {
-    [Info("Admin Radar", "nivex", "5.0.6")]
+    [Info("Admin Radar", "nivex", "5.0.7")]
     [Description("Radar tool for Admins and Developers.")]
     class AdminRadar : RustPlugin
     {
@@ -36,6 +34,7 @@ namespace Oxide.Plugins
         private const string permBypass = "adminradar.bypass";
         private const string permAuto = "adminradar.auto";
         private const string permBypassOverride = "adminradar.bypass.override";
+        private const string permList = "adminradar.list";
         private const string genericPrefab = "assets/prefabs/tools/map/genericradiusmarker.prefab";
         private const string vendingPrefab = "assets/prefabs/deployable/vendingmachine/vending_mapmarker.prefab";
         private const float flickerDelay = 0.05f;
@@ -127,6 +126,33 @@ namespace Oxide.Plugins
             public readonly List<SupplyDrop> SupplyDrops = new List<SupplyDrop>();
             public readonly List<AutoTurret> Turrets = new List<AutoTurret>();
             public readonly List<Zombie> Zombies = new List<Zombie>();
+
+            public void Clear()
+            {
+                Animals.Clear();
+                CargoPlanes.Clear();
+                Backpacks.Clear();
+                Bags.Clear();
+                Boats.Clear();
+                BradleyAPCs.Clear();
+                CargoShips.Clear();
+                Cars.Clear();
+                CCTV.Clear();
+                CH47.Clear();
+                Cupboards.Clear();
+                Collectibles.Clear();
+                Containers.Clear();
+                Corpses.Clear();
+                Helicopters.Clear();
+                MiniCopter.Clear();
+                NPCPlayers.Clear();
+                Ores.Clear();
+                RHIB.Clear();
+                RidableHorse.Clear();
+                SupplyDrops.Clear();
+                Turrets.Clear();
+                Zombies.Clear();
+            }
         }
 
         private class StoredData
@@ -339,7 +365,7 @@ namespace Oxide.Plugins
             private List<BasePlayer> removePlayers;
             private bool limitFlag;
             private int limitIndex;
-            private string playerName;
+            public string playerName;
             private string playerId;
             private Vector3 lastPosition;
             private bool canBypassOverride;
@@ -2067,16 +2093,16 @@ namespace Oxide.Plugins
             Unsubscribe(nameof(OnPlayerVoice));
             Unsubscribe(nameof(OnPlayerConnected));
             Unsubscribe(nameof(OnPlayerSleepEnded));
+            permission.RegisterPermission(permAllowed, this);
+            permission.RegisterPermission(permBypass, this);
+            permission.RegisterPermission(permAuto, this);
+            permission.RegisterPermission(permBypassOverride, this);
+            permission.RegisterPermission(permList, this);
         }
 
         private void Loaded()
         {
             isUnloading = False;
-            cache = new Cache();
-            permission.RegisterPermission(permAllowed, this);
-            permission.RegisterPermission(permBypass, this);
-            permission.RegisterPermission(permAuto, this);
-            permission.RegisterPermission(permBypassOverride, this);
         }
 
         private void OnServerInitialized()
@@ -2143,9 +2169,34 @@ namespace Oxide.Plugins
 
         private void OnPlayerSleepEnded(BasePlayer player)
         {
-            if (player.IsValid() && player.IsConnected && player.GetComponent<Radar>() == null && permission.UserHasPermission(player.UserIDString, permAuto) && HasAccess(player))
+            if (!HasAccess(player))
+            {
+                return;
+            }
+
+            if (player.IsValid() && player.IsConnected && player.GetComponent<Radar>() == null && permission.UserHasPermission(player.UserIDString, permAuto))
             {
                 RadarCommand(player, "radar", new string[0]);
+            }
+
+            if (showUI && !barebonesMode)
+            {
+                if (radarUI.Contains(player.UserIDString))
+                {
+                    DestroyUI(player);
+                }
+
+                if (!storedData.Hidden.Contains(player.UserIDString))
+                {
+                    var radar = activeRadars.FirstOrDefault(x => x.player == player);
+
+                    if (radar == null)
+                    {
+                        return;
+                    }
+
+                    CreateUI(player, radar, radar.showAll);
+                }
             }
         }
 
@@ -2195,6 +2246,7 @@ namespace Oxide.Plugins
                 radar.StopAll();
             }
 
+            cache.Clear();
             DestroyAll<Radar>();
             playersColor.Clear();
             tags.Clear();
@@ -2711,6 +2763,12 @@ namespace Oxide.Plugins
 
         private void RadarCommand(BasePlayer player, string command, string[] args)
         {
+            if (args.Length == 1 && args[0].ToLower() == "list" && permission.UserHasPermission(player.UserIDString, permList))
+            {
+                Player.Message(player, "List of active radars: " + string.Join(", ", activeRadars.Where(x => x.player.IsValid()).Select(x => x.playerName)));
+                return;
+            }
+            
             if (!HasAccess(player))
             {
                 Message(player, msg("NotAllowed", player.UserIDString));

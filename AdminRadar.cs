@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
 using System.Text;
 using System.Text.RegularExpressions;
 using Oxide.Core;
@@ -10,14 +11,13 @@ using Rust;
 using UnityEngine;
 
 /*
-    Fixed green X drawings in GroupLimitHightlighting
-    Fixed TC / TCArrows argument
-    Please read 4.8.0 notes
+    Fixed `/anchors_save` not saving the config
+    Fixed Error @GroupLimitHightlighting: Index was out of range > Radar.ShowLimits()
 */
 
 namespace Oxide.Plugins
 {
-    [Info("Admin Radar", "nivex", "4.8.2")]
+    [Info("Admin Radar", "nivex", "4.8.3")]
     [Description("Radar tool for Admins and Developers.")]
     class AdminRadar : RustPlugin
     {
@@ -197,7 +197,7 @@ namespace Oxide.Plugins
                 player = GetComponent<BasePlayer>();
                 source = player;
                 position = player.transform.position;
-                
+
                 if (inactiveSeconds > 0f || inactiveMinutes > 0)
                     InvokeRepeating(Activity, 0f, 1f);
             }
@@ -397,7 +397,7 @@ namespace Oxide.Plugins
 
                     if (!ShowOre())
                         return;
-                    
+
                     if (!ShowEntity(EntityType.CH47Helicopters, showCH47, "CH47", cache.CH47))
                         return;
 
@@ -680,7 +680,7 @@ namespace Oxide.Plugins
                 }
 
                 var ping = pings[target.userID];
-                
+
                 if (ping.Time == 0f || Time.realtimeSinceStartup - ping.Time >= averagePingInterval)
                 {
                     ping.Time = Time.realtimeSinceStartup;
@@ -714,7 +714,7 @@ namespace Oxide.Plugins
                 {
                     return false;
                 }
-                
+
                 foreach (char c in value)
                 {
                     if (!char.IsDigit(c))
@@ -847,7 +847,7 @@ namespace Oxide.Plugins
                 entityType = EntityType.Sleepers;
                 double currDistance;
                 Color color;
-                
+
                 foreach (var sleeper in BasePlayer.sleepingPlayerList)
                 {
                     if (sleeper == null || sleeper.transform == null)
@@ -900,7 +900,7 @@ namespace Oxide.Plugins
 
                 entityType = EntityType.Heli;
                 double currDistance;
-                
+
                 if (cache.Helicopters.Count > 0)
                 {
                     foreach (var heli in cache.Helicopters)
@@ -928,7 +928,7 @@ namespace Oxide.Plugins
 
                 entityType = EntityType.Bradley;
                 double currDistance;
-                
+
                 if (cache.BradleyAPCs.Count > 0)
                 {
                     foreach (var bradley in cache.BradleyAPCs)
@@ -954,7 +954,7 @@ namespace Oxide.Plugins
                     return true;
 
                 entityType = EntityType.GroupLimitHightlighting;
-                
+
                 if (distantPlayers.Count > 0)
                 {
                     distantPlayers.RemoveAll(p => p == null || p.transform == null || !p.IsConnected);
@@ -963,7 +963,7 @@ namespace Oxide.Plugins
                     var players = new List<BasePlayer>();
                     bool foundPlayer = false;
 
-                    foreach (var target in distantPlayers.ToArray())
+                    foreach (var target in distantPlayers.ToList())
                     {
                         players.Clear();
 
@@ -973,7 +973,7 @@ namespace Oxide.Plugins
                             {
                                 foundPlayer = false;
 
-                                foreach(var list in groupedPlayers.Values)
+                                foreach (var list in groupedPlayers.Values)
                                 {
                                     if (list.Contains(player))
                                     {
@@ -988,7 +988,7 @@ namespace Oxide.Plugins
                                 }
                             }
                         }
-                        
+
                         if (players.Count >= groupLimit)
                         {
                             int index = 0;
@@ -1058,7 +1058,7 @@ namespace Oxide.Plugins
 
                                 if (building != null)
                                 {
-                                    foreach(var entity in building.decayEntities)
+                                    foreach (var entity in building.decayEntities)
                                     {
                                         if (entity is SleepingBag)
                                         {
@@ -1098,7 +1098,7 @@ namespace Oxide.Plugins
 
                 return LatencyAccepted();
             }
-                        
+
             private bool ShowContainers()
             {
                 if (!showBox && !showLoot && !showStash)
@@ -1325,7 +1325,7 @@ namespace Oxide.Plugins
                     if (skipUnderworld)
                     {
                         j = TerrainMeta.HeightMap.GetHeight(target.transform.position);
-                        
+
                         if (j > target.transform.position.y)
                         {
                             if (source.transform.position.y > k)
@@ -1347,7 +1347,7 @@ namespace Oxide.Plugins
                     if (currDistance < npcPlayerDistance)
                     {
                         string displayName = !string.IsNullOrEmpty(target.displayName) && IsLetters(target.displayName) ? target.displayName : target.ShortPrefabName == "scarecrow" ? ins.msg("scarecrow", player.UserIDString) : target.PrefabName.Contains("scientist") ? ins.msg("scientist", player.UserIDString) : target is NPCMurderer ? ins.msg("murderer", player.UserIDString) : ins.msg("npc", player.UserIDString);
-                        if (ConVar.Server.hostname.Contains("Test Server")) displayName = target is HTNPlayer ? "htn" : target is NPCMurderer ? "murderer" : target is Scientist ? "scientist" :  target.ShortPrefabName;
+                        if (ConVar.Server.hostname.Contains("Test Server")) displayName = target is HTNPlayer ? "htn" : target is NPCMurderer ? "murderer" : target is Scientist ? "scientist" : target.ShortPrefabName;
 
                         if (drawArrows) player.SendConsoleCommand("ddraw.arrow", invokeTime + flickerDelay, __(npcColor), target.transform.position + new Vector3(0f, target.transform.position.y + 10), target.transform.position, 1);
                         if (drawText) player.SendConsoleCommand("ddraw.text", invokeTime + flickerDelay, __(npcColor), target.transform.position + new Vector3(0f, 2f, 0f), string.Format("{0} <color={1}>{2}</color> <color={3}>{4}</color>", displayName, healthCC, Math.Floor(target.health), distCC, currDistance));
@@ -1384,7 +1384,7 @@ namespace Oxide.Plugins
 
                 entityType = EntityType.Ore;
                 double currDistance;
-                
+
                 foreach (var ore in cache.Ores)
                 {
                     currDistance = Math.Floor(Vector3.Distance(ore.Key, source.transform.position));
@@ -1408,7 +1408,7 @@ namespace Oxide.Plugins
 
                 entityType = EntityType.Collectibles;
                 double currDistance;
-                
+
                 foreach (var col in cache.Collectibles)
                 {
                     currDistance = Math.Floor(Vector3.Distance(col.Key, source.transform.position));
@@ -1472,7 +1472,7 @@ namespace Oxide.Plugins
                         if (objectsLimit > 0 && ++drawnObjects > objectsLimit) return false;
                     }
                 }
-                
+
                 return LatencyAccepted();
             }
 
@@ -1500,7 +1500,7 @@ namespace Oxide.Plugins
                 {
                     return string.Empty;
                 }
-                
+
                 var list = new List<string>();
                 int count = 0;
                 int amount = 0;
@@ -1511,7 +1511,7 @@ namespace Oxide.Plugins
 
                     count += container.itemList.Count;
 
-                    foreach(var item in container.itemList)
+                    foreach (var item in container.itemList)
                     {
                         list.Add(string.Format("{0} ({1})", item.info.displayName.translated.ToLower(), item.amount));
 
@@ -1563,10 +1563,10 @@ namespace Oxide.Plugins
                 return value * 0.02;
             }
         }
-        
+
         private bool IsRadar(string id)
         {
-            foreach(var radar in activeRadars)
+            foreach (var radar in activeRadars)
             {
                 if (radar.player.UserIDString == id)
                 {
@@ -1655,7 +1655,7 @@ namespace Oxide.Plugins
         {
             if (player == null)
                 return;
-            
+
             accessList.RemoveAll(p => p == null || p == player || !p.IsConnected);
 
             if (player.IsAdmin || HasAccess(player))
@@ -1751,7 +1751,7 @@ namespace Oxide.Plugins
         private object OnEntityTakeDamage(BaseCombatEntity entity, HitInfo info)
         {
             var attacker = info?.Initiator as BasePlayer;
-            
+
             if (attacker == null || !attacker.IsConnected)
             {
                 return null;
@@ -1961,7 +1961,7 @@ namespace Oxide.Plugins
 
                     if (itemList != null)
                     {
-                        foreach(var item in itemList)
+                        foreach (var item in itemList)
                         {
                             sum += (int)item.amount;
                         }
@@ -1979,7 +1979,7 @@ namespace Oxide.Plugins
                 {
                     float amount = 0;
 
-                    foreach(var item in entity.GetComponentInParent<ResourceDispenser>().containedItems)
+                    foreach (var item in entity.GetComponentInParent<ResourceDispenser>().containedItems)
                     {
                         amount += item.amount;
                     }
@@ -2189,7 +2189,7 @@ namespace Oxide.Plugins
 
             cmdESP(player, "espgui", arg.Args);
         }
-        
+
         private void cmdESP(BasePlayer player, string command, string[] args)
         {
             if (!HasAccess(player))
@@ -2328,6 +2328,7 @@ namespace Oxide.Plugins
                 {
                     Config.Set("GUI", "Anchor Min", anchorMin);
                     Config.Set("GUI", "Anchor Max", anchorMax);
+                    Config.Save();
                     player.ChatMessage($"Saved: {anchorMin} {anchorMax}");
                     return;
                 }
@@ -2337,6 +2338,7 @@ namespace Oxide.Plugins
                     anchorMax = anchorMaxDefault;
                     Config.Set("GUI", "Anchor Min", anchorMin);
                     Config.Set("GUI", "Anchor Max", anchorMax);
+                    Config.Save();
                     player.ChatMessage($"Reset: {anchorMin} {anchorMax}");
                     return;
                 }
@@ -2394,7 +2396,7 @@ namespace Oxide.Plugins
                     player.ChatMessage(activeRadars.Count == 0 ? msg("NoActiveRadars", player.UserIDString) : msg("ActiveRadars", player.UserIDString, sb.ToString()));
                     return;
                 }
-                else if (args[0] == "f") 
+                else if (args[0] == "f")
                     args = storedData.Filters[player.UserIDString].ToArray();
             }
 
@@ -2430,7 +2432,7 @@ namespace Oxide.Plugins
 
                 list.Clear();
 
-                foreach(string arg in args)
+                foreach (string arg in args)
                 {
                     list.Add(arg);
                 }
@@ -2502,7 +2504,7 @@ namespace Oxide.Plugins
 
         private bool isArg(string[] args, string arg, bool equalTo = false)
         {
-            foreach(string Arg in args)
+            foreach (string Arg in args)
             {
                 if (equalTo)
                 {
@@ -2778,7 +2780,7 @@ namespace Oxide.Plugins
         private static bool showUI;
         private static bool showTCAuthedCount;
         private static bool showTCBagCount;
-        
+
         private static string distCC;
         private static string heliCC;
         private static string bradleyCC;
@@ -2827,7 +2829,7 @@ namespace Oxide.Plugins
         private static bool trackSupplyDrops = true;
         private static bool trackTC = true;
         private static bool trackTurrets = true;
-        
+
         private static bool trackMiniCopter; // additional tracking
         private static bool trackHeli;
         private static bool trackBradley;
@@ -3056,7 +3058,7 @@ namespace Oxide.Plugins
             objectsLimit = Convert.ToInt32(GetConfig("Settings", "Objects Drawn Limit (0 = unlimited)", 250));
             var exceptions = GetConfig("Settings", "Dropped Item Exceptions", ItemExceptions) as List<object>;
 
-            foreach(var exception in exceptions)
+            foreach (var exception in exceptions)
             {
                 itemExceptions.Add(exception.ToString());
             }
@@ -3083,7 +3085,7 @@ namespace Oxide.Plugins
             skipUnderworld = Convert.ToBoolean(GetConfig("Options", "Only Show NPCPlayers At World View", false));
             showTCAuthedCount = Convert.ToBoolean(GetConfig("Options", "Show Authed Count On Cupboards", true));
             showTCBagCount = Convert.ToBoolean(GetConfig("Options", "Show Bag Count On Cupboards", true));
-            
+
             drawArrows = Convert.ToBoolean(GetConfig("Drawing Methods", "Draw Arrows On Players", false));
             drawBox = Convert.ToBoolean(GetConfig("Drawing Methods", "Draw Boxes", false));
             drawText = Convert.ToBoolean(GetConfig("Drawing Methods", "Draw Text", true));
@@ -3092,7 +3094,7 @@ namespace Oxide.Plugins
             groupLimit = Convert.ToInt32(GetConfig("Group Limit", "Limit", 4));
             groupRange = Convert.ToSingle(GetConfig("Group Limit", "Range", 50f));
             groupCountHeight = Convert.ToSingle(GetConfig("Group Limit", "Height Offset [0.0 = disabled]", 40f));
-            
+
             mcDistance = Convert.ToSingle(GetConfig("Drawing Distances", "MiniCopter", 200f));
             boatDistance = Convert.ToSingle(GetConfig("Drawing Distances", "Boats", 150f));
             carDistance = Convert.ToSingle(GetConfig("Drawing Distances", "Cars", 500f));
@@ -3257,14 +3259,14 @@ namespace Oxide.Plugins
         {
             var sb = new StringBuilder(id == null ? RemoveFormatting(lang.GetMessage(key, this, id)) : lang.GetMessage(key, this, id));
 
-            foreach(var entry in hexColors)
+            foreach (var entry in hexColors)
             {
                 if (sb.ToString().Contains(entry.Key))
                 {
                     sb.Replace(entry.Key, entry.Value);
                 }
             }
-            
+
             return args.Length > 0 ? string.Format(sb.ToString(), args) : sb.ToString();
         }
 

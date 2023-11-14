@@ -16,22 +16,9 @@ using Oxide.Game.Rust.Libraries;
 using Rust;
 using UnityEngine;
 
-/*
-
-*/
-
-//https://umod.org/community/admin-radar/40872-give-us-options-to-allow-radar-only-in-spectate-or-in-vanish?page=1#post-3 
-//https://umod.org/community/admin-radar/38890-cant-see-zombies-zh?page=2#post-22
-// make all entities dynamic and where they can be assigned to any filter or their own
-// implement toggable filters
-
-// add submarines
-//cache deployables
-//https://umod.org/community/admin-radar/32562-show-if-person-near-tc
-
 namespace Oxide.Plugins
 {
-    [Info("Admin Radar", "nivex", "5.1.8")]
+    [Info("Admin Radar", "nivex", "5.1.9")]
     [Description("Radar tool for Admins and Developers.")]
     class AdminRadar : RustPlugin
     {
@@ -251,9 +238,12 @@ namespace Oxide.Plugins
             List<T> result = new List<T>();
             using (var enumerator = networkables.GetEnumerator())
             {
-                if (enumerator.Current is T)
+                while (enumerator.MoveNext())
                 {
-                    result.Add(enumerator.Current as T);
+                    if (enumerator.Current is T)
+                    {
+                        result.Add(enumerator.Current as T);
+                    }
                 }
             }
             return result;
@@ -376,12 +366,6 @@ namespace Oxide.Plugins
             public bool showAll;
             private BaseEntity source;
             public bool barebonesMode;
-
-            private class Ping
-            {
-                public int AveragePing;
-                public float Time;
-            }
 
             private class PrivInfo
             {
@@ -587,7 +571,7 @@ namespace Oxide.Plugins
             {
                 do
                 {
-                    if (!player || !player.IsConnected || ins == null || ins.isUnloading)
+                    if (player == null || !player.IsConnected || ins == null || ins.isUnloading)
                     {
                         Destroy(this);
                         yield break;
@@ -626,7 +610,7 @@ namespace Oxide.Plugins
             {
                 do
                 {
-                    if (!player || !player.IsConnected || ins == null || ins.isUnloading)
+                    if (player == null || !player.IsConnected || ins == null || ins.isUnloading)
                     {
                         Destroy(this);
                         yield break;
@@ -3729,6 +3713,11 @@ namespace Oxide.Plugins
                 {
                     if (entity is DroppedItem || entity is Landmine || entity is BearTrap || entity is DroppedItemContainer)
                     {
+                        if (entity == null || entity.IsDestroyed)
+                        {
+                            continue;
+                        }
+
                         drop = entity as DroppedItem;
                         string shortname = drop?.item?.info.shortname ?? entity.ShortPrefabName;
                         currDistance = (entity.transform.position - player.transform.position).magnitude;

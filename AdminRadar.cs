@@ -3,7 +3,6 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Globalization;
-using System.Linq;
 using System.Text;
 using System.Text.RegularExpressions;
 using Facepunch;
@@ -18,24 +17,23 @@ using Rust;
 using UnityEngine;
 
 /*
-Fix for Rust update
-Fixed exploit where users could retain temporary admin flag
-Added `/radar findbyid <id>` which will draw on your screen the location of each base owned by this user
-Added `Additional Tracking -> Backpacks Plugin` (false) - shows an asterisk if player has items in their backpack @dbmdude
-Added sharks to npc filter
-Simplified several npc names and added them to the language file
+Fixed NPC detection
+Fixed Plane Crash detection
+Added options for MLRS detection
+NPC using melee weapons will now use `Color-Hex Codes => Murderers`
+Updated `/radar findbyid steamid` to find all owned/authed entities
 */
 
 // make all entities dynamic and where they can be assigned to any filter or their own
 // implement toggable filters
 
-// add subs
+// add submarines
 //cache deployables
 //https://umod.org/community/admin-radar/32562-show-if-person-near-tc
 
 namespace Oxide.Plugins
 {
-    [Info("Admin Radar", "nivex", "5.1.5")]
+    [Info("Admin Radar", "nivex", "5.1.6")]
     [Description("Radar tool for Admins and Developers.")]
     class AdminRadar : RustPlugin
     {
@@ -64,6 +62,7 @@ namespace Oxide.Plugins
             public readonly List<SupplyDrop> SupplyDrops = new List<SupplyDrop>();
             public readonly List<AutoTurret> Turrets = new List<AutoTurret>();
             public readonly List<Zombie> Zombies = new List<Zombie>();
+            public readonly List<BaseEntity> MLRS = new List<BaseEntity>();
 
             public class CacheInfo
             {
@@ -82,7 +81,7 @@ namespace Oxide.Plugins
 
             private void Create()
             {
-                foreach (var entity in BaseNetworkable.serverEntities.OfType<BaseEntity>())
+                foreach (BaseEntity entity in BaseNetworkable.serverEntities)
                 {
                     CacheInfo ci;
                     if (!dict.TryGetValue(entity.GetType().Name, out ci))
@@ -238,6 +237,7 @@ namespace Oxide.Plugins
             GroupLimit,
             Heli,
             MiniCopter,
+            MLRS,
             Npc,
             Ore,
             RidableHorses,
@@ -351,6 +351,7 @@ namespace Oxide.Plugins
             public bool showHT;
             public bool showLoot;
             public bool showMiniCopter;
+            public bool showMLRS;
             public bool showNPC;
             public bool showOre;
             public bool showRidableHorses;
@@ -378,7 +379,6 @@ namespace Oxide.Plugins
             }
 
             private Dictionary<BuildingPrivlidge, PrivInfo> tcs;
-            private Dictionary<ulong, Ping> pings;
             private Dictionary<int, List<BasePlayer>> groupedPlayers;
             private List<BasePlayer> nearbyPlayers;
             private List<BasePlayer> distantPlayers;
@@ -398,7 +398,6 @@ namespace Oxide.Plugins
                 nearbyPlayers = new List<BasePlayer>();
                 distantPlayers = new List<BasePlayer>();
                 tcs = new Dictionary<BuildingPrivlidge, PrivInfo>();
-                pings = new Dictionary<ulong, Ping>();
 
                 ins.activeRadars.Add(this);
 
@@ -447,7 +446,6 @@ namespace Oxide.Plugins
                 groupedPlayers.Clear();
                 distantPlayers.Clear();
                 tcs.Clear();
-                pings.Clear();
 
                 if (radarUI != null && radarUI.Contains(player.UserIDString))
                     DestroyUI(player);
@@ -518,6 +516,8 @@ namespace Oxide.Plugins
                         return showLoot;
                     case "MiniCopter":
                         return showMiniCopter;
+                    case "MLRS":
+                        return showMLRS;
                     case "NPC":
                         return showNPC;
                     case "Ore":
@@ -639,6 +639,12 @@ namespace Oxide.Plugins
                     }
 
                     if (ShowSleepers() >= 300)
+                    {
+                        checks = 0;
+                        yield return null;
+                    }
+
+                    if (ShowEntity(EntityType.MLRS, showMLRS, "MLRS", cache.MLRS) >= 300)
                     {
                         checks = 0;
                         yield return null;
@@ -937,6 +943,14 @@ namespace Oxide.Plugins
                             cache.MiniCopter.Clear();
                         }
                         break;
+                    case EntityType.MLRS:
+                        {
+                            showMLRS = False;
+                            uiBtnMLRS = False;
+                            trackMLRS = False;
+                            cache.MLRS.Clear();
+                        }
+                        break;
                     case EntityType.Ore:
                         {
                             trackOre = False;
@@ -995,11 +1009,18 @@ namespace Oxide.Plugins
                 uiButtons = null;
             }
 
+            private Dictionary<ulong, bool> _backpacks = new Dictionary<ulong, bool>();
+
             private bool API_GetExistingBackpacks(ulong playerId)
             {
                 if (!ins.trackBackpacks)
                 {
                     return false;
+                }
+
+                if (_backpacks.ContainsKey(playerId))
+                {
+                    return _backpacks[playerId];
                 }
 
                 var backpacks = ins.Backpacks?.Call("API_GetExistingBackpacks") as Dictionary<ulong, ItemContainer>;
@@ -1009,12 +1030,18 @@ namespace Oxide.Plugins
                     return false;
                 }
 
+                ins.timer.Once(60f, () => _backpacks.Remove(playerId));
+
                 ItemContainer container;
                 if (backpacks.TryGetValue(playerId, out container) && !container.IsEmpty())
                 {
+                    _backpacks.Add(playerId, true);
+                    
                     return true;
                 }
 
+                _backpacks.Add(playerId, false);
+                
                 return false;
             }
 
@@ -1047,23 +1074,6 @@ namespace Oxide.Plugins
                 }
 
                 return positions[0];
-            }
-
-            private int GetAveragePing(BasePlayer target)
-            {
-                Ping ping;
-                if (!pings.TryGetValue(target.userID, out ping))
-                {
-                    pings[target.userID] = ping = new Ping();
-                }
-
-                if (ping.Time == 0f || Time.realtimeSinceStartup - ping.Time >= averagePingInterval)
-                {
-                    ping.Time = Time.realtimeSinceStartup;
-                    ping.AveragePing = Network.Net.sv.GetAveragePing(target.Connection);
-                }
-
-                return ping.AveragePing;
             }
 
             private bool IsNumeric(string value)
@@ -1257,7 +1267,7 @@ namespace Oxide.Plugins
                 {
                     foreach (var target in BasePlayer.activePlayerList)
                     {
-                        if (target == null || target.transform == null || !target.IsConnected || list.Contains(target.userID))
+                        if (target == null || target.IPlayer == null || !target.IsConnected || list.Contains(target.userID))
                         {
                             continue;
                         }
@@ -1277,19 +1287,21 @@ namespace Oxide.Plugins
                         var isFlying = !target.IsOnGround() || target.IsFlying;
                         var isUnderground = !isFlying && target.transform.position.y + 1f < TerrainMeta.HeightMap.GetHeight(target.transform.position);
 
-                        color = __(isFlying ? activeFlyingCC : isUnderground ? activeUndergroundCC : target.IsAlive() ? activeCC : activeDeadCC);
+                        color = __(isFlying ? activeFlyingCC : isUnderground ? activeUndergroundCC : target.health > 0f ? activeCC : activeDeadCC);
 
-                        if ((target.IsAdmin || ins.permission.UserHasPermission(target.UserIDString, "fauxadmin.allowed")) && canBypassOverride)
+                        if (canBypassOverride && (target.IsAdmin || ins.permission.UserHasPermission(target.UserIDString, "fauxadmin.allowed")))
                         {
                             color = Color.magenta;
                         }
 
                         if (currDistance < playerDistance)
                         {
-                            if (ins.storedData.Extended.Contains(player.UserIDString) && target.GetActiveItem() != null)
+                            if (ins.storedData.Extended.Contains(player.UserIDString) && target.svActiveItemID != 0u)
                             {
-                                _cachedStringBuilder.Append(target.GetActiveItem().info.displayName.translated);
-                                var itemList = target.GetActiveItem().contents?.itemList;
+                                Item item = target.GetActiveItem();
+
+                                _cachedStringBuilder.Append(item.info.displayName.translated);
+                                var itemList = item.contents?.itemList;
 
                                 if (itemList?.Count > 0)
                                 {
@@ -1312,7 +1324,7 @@ namespace Oxide.Plugins
                             if (averagePingInterval > 0)
                             {
                                 _cachedStringBuilder.Append(" ");
-                                _cachedStringBuilder.Append(GetAveragePing(target));
+                                _cachedStringBuilder.Append(target.IPlayer?.Ping ?? -1);
                                 _cachedStringBuilder.Append("ms");
                             }
 
@@ -1565,7 +1577,7 @@ namespace Oxide.Plugins
 
                 try
                 {
-                    distantPlayers.RemoveAll(p => p == null || p.transform == null);
+                    distantPlayers.RemoveAll(p => p == null || p.IsDestroyed);
                     checks++;
 
                     if (distantPlayers.Count == 0)
@@ -1606,7 +1618,7 @@ namespace Oxide.Plugins
                         if (nearbyPlayers.Count > groupLimit)
                         {
                             while (groupedPlayers.ContainsKey(limitIndex)) limitIndex++;
-                            groupedPlayers.Add(limitIndex, nearbyPlayers.ToList());
+                            groupedPlayers.Add(limitIndex, new List<BasePlayer>(nearbyPlayers));
                             removePlayers.AddRange(nearbyPlayers);
                         }
                     }
@@ -1970,7 +1982,7 @@ namespace Oxide.Plugins
 
                     foreach (var target in cache.NPCPlayers)
                     {
-                        if (target == null || target.transform == null || target.IsDestroyed)
+                        if (target == null || target.IsDestroyed || target.transform == null)
                             continue;
 
                         currDistance = (target.transform.position - source.transform.position).magnitude;
@@ -2003,6 +2015,10 @@ namespace Oxide.Plugins
                         }
 
                         string npcColor = target.ShortPrefabName.Contains("peacekeeper") ? peacekeeperCC : target.name.Contains("scientist") ? scientistCC : target.ShortPrefabName == "murderer" ? murdererCC : npcCC;
+
+                        var heldEntity = target.GetHeldEntity();
+
+                        if (heldEntity != null && !(heldEntity is BaseProjectile) && heldEntity.hostile) npcColor = murdererCC;
 
                         if (currDistance < npcPlayerDistance)
                         {
@@ -2220,6 +2236,11 @@ namespace Oxide.Plugins
                             {
                                 if (currDistance > mcDistance) continue;
                                 if (!trackMiniCopter && !uiBtnMiniCopter) continue;
+                            }
+                            else if (entityType == EntityType.MLRS)
+                            {
+                                if (currDistance > mlrsDistance) continue;
+                                if (!trackMLRS && !uiBtnMLRS) continue;
                             }
                             else if (entityType == EntityType.RidableHorses)
                             {
@@ -2583,14 +2604,14 @@ namespace Oxide.Plugins
 
                 if (!storedData.Hidden.Contains(player.UserIDString))
                 {
-                    var radar = activeRadars.FirstOrDefault(x => x.player == player);
-
-                    if (radar == null)
+                    foreach (var radar in activeRadars)
                     {
-                        return;
+                        if (radar.player == player)
+                        {
+                            CreateUI(player, radar, radar.showAll);
+                            break;
+                        }
                     }
-
-                    CreateUI(player, radar, radar.showAll);
                 }
             }
         }
@@ -2663,12 +2684,12 @@ namespace Oxide.Plugins
             StopFillCache();
             Interface.Oxide.DataFileSystem.WriteObject(Name, storedData);
 
-            foreach (var radar in activeRadars)
+            foreach (var radar in new List<Radar>(activeRadars))
             {
                 radar.StopAll();
+                UnityEngine.Object.Destroy(radar);
             }
 
-            DestroyAll<Radar>();
             playersColor.Clear();
             tags.Clear();
             voices.Clear();
@@ -2682,19 +2703,6 @@ namespace Oxide.Plugins
             cis.Clear();
             ins = null;
             _cachedStringBuilder = null;
-        }
-
-        void DestroyAll<T>()
-        {
-            var objects = UnityEngine.Object.FindObjectsOfType(typeof(T));
-
-            if (objects != null)
-            {
-                foreach (var gameObj in objects)
-                {
-                    UnityEngine.Object.Destroy(gameObj);
-                }
-            }
         }
 
         private object BlockDamage(HitInfo hitInfo, BasePlayer player, bool flag, string key)
@@ -2761,19 +2769,19 @@ namespace Oxide.Plugins
             return null;
         }
 
-        private void OnEntityDeath(BaseCombatEntity entity, HitInfo info)
+        private void OnEntityDeath(BaseEntity entity, HitInfo info)
         {
             RemoveFromCache(entity as BaseEntity);
         }
 
-        private void OnEntityKill(BaseNetworkable entity)
+        private void OnEntityKill(BaseEntity entity)
         {
-            RemoveFromCache(entity as BaseEntity);
+            RemoveFromCache(entity);
         }
 
-        private void OnEntitySpawned(BaseNetworkable entity)
+        private void OnEntitySpawned(BaseEntity entity)
         {
-            AddToCache(entity as BaseEntity);
+            AddToCache(entity);
         }
 
         private static bool IsHex(string value)
@@ -2852,7 +2860,13 @@ namespace Oxide.Plugins
 
             var position = entity.transform.position;
 
-            if (trackNPC && (entity.IsNpc || entity is SimpleShark))
+            if (trackMLRS && entity is MLRSRocket)
+            {
+                cache.MLRS.Add(entity);
+                return true;
+            }
+
+            if (trackNPC)
             {
                 if (trackRidableHorses && entity is RidableHorse)
                 {
@@ -2889,8 +2903,6 @@ namespace Oxide.Plugins
                     cache.Zombies.Add(entity as Zombie);
                     return True;
                 }
-
-                return False;
             }
 
             if (trackCCTV && entity is CCTV_RC)
@@ -2997,13 +3009,11 @@ namespace Oxide.Plugins
 
                 return False;
             }
-            else if (trackCargoPlanes && entity is CargoPlane)
+            else if (trackCargoPlanes && (entity is CargoPlane || entity.gameObject.name == "CrashPlane"))
             {
-                if (!cache.CargoPlanes.Contains(entity as CargoPlane))
-                {
-                    cache.CargoPlanes.Add(entity as CargoPlane);
-                    return True;
-                }
+                cache.CargoPlanes.Remove(entity);
+                cache.CargoPlanes.Add(entity);
+                return True;
             }
             else if (trackHeli && entity is BaseHelicopter)
             {
@@ -3108,6 +3118,11 @@ namespace Oxide.Plugins
                 return;
             }
 
+            if (entity is MLRSRocket)
+            {
+                cache.MLRS.Remove(entity);
+            }
+
             var position = entity.transform?.position ?? Vector3.zero;
 
             if (cache.Ores.ContainsKey(position))
@@ -3200,7 +3215,9 @@ namespace Oxide.Plugins
         {
             if (args.Length == 1 && args[0].ToLower() == "list" && permission.UserHasPermission(player.UserIDString, permList))
             {
-                Player.Message(player, "List of active radars: " + string.Join(", ", activeRadars.Where(x => x.player.IsValid()).Select(x => x.playerName)));
+                var users = new List<string>();
+                activeRadars.ForEach(x => { if (x.player.IsValid()) users.Add(x.player.displayName); });
+                Player.Message(player, "List of active radars: " + string.Join(", ", users.ToArray()));
                 return;
             }
             
@@ -3238,8 +3255,8 @@ namespace Oxide.Plugins
                         return;
                     case "train":
                         {
-                            foreach (var train in BaseNetworkable.serverEntities.OfType<BaseTrain>())
-                            {
+                            foreach (BaseTrain train in BaseNetworkable.serverEntities)
+                            { 
                                 timer.Repeat(1f, 60, () => 
                                 {
                                     player.SendConsoleCommand("ddraw.text", 1f, Color.red, train.transform.position, train.GetType().Name);
@@ -3249,7 +3266,9 @@ namespace Oxide.Plugins
                         return;
                     case "buildings":
                         {
-                            DrawBuildings(player);
+                            bool raid = false;
+                            foreach (var arg in args) { if (arg.Contains("raid")) raid = true; break; }
+                            DrawBuildings(player, raid);
                         }
                         return;
                     case "findbyid":
@@ -3336,7 +3355,7 @@ namespace Oxide.Plugins
                         return;
                     case "help":
                         {
-                            Message(player, msg("Help1", player.UserIDString, string.Join(", ", GetButtonNames, "HT")));
+                            Message(player, msg("Help1", player.UserIDString, string.Join(", ", GetButtonNames) + ", HT"));
                             Message(player, msg("Help2", player.UserIDString, command, "online"));
                             Message(player, msg("Help3", player.UserIDString, command, "ui"));
                             Message(player, msg("Help7", player.UserIDString, command, "vision"));
@@ -3496,6 +3515,7 @@ namespace Oxide.Plugins
             radar.showHeli = isArg(args, "heli") || showAll || (!uiBtnHeli && trackHeli);
             radar.showLoot = isArg(args, "loot") || showAll;
             radar.showMiniCopter = isArg(args, "mini") || showAll || (!uiBtnMiniCopter && trackMiniCopter);
+            radar.showMLRS = isArg(args, "mlrs") || showAll || (!uiBtnMLRS && trackMLRS); 
             radar.showNPC = isArg(args, "npc") || showAll;
             radar.showOre = isArg(args, "ore") || showAll;
             radar.showRidableHorses = isArg(args, "horse") || showAll || (!uiBtnRidableHorses && trackRidableHorses);
@@ -3557,12 +3577,14 @@ namespace Oxide.Plugins
         {
             if (args.Length != 2)
             {
+                player.ChatMessage("/radar findbyid id");
                 return;
             }
             
             ulong userID;
             if (!ulong.TryParse(args[1], out userID))
             {
+                player.ChatMessage($"Invalid steam id: {userID}");
                 return;
             }
 
@@ -3575,25 +3597,24 @@ namespace Oxide.Plugins
                     player.SetPlayerFlag(BasePlayer.PlayerFlags.IsAdmin, true);
                     player.SendNetworkUpdateImmediate();
                 }
-
-                foreach (var building in BuildingManager.server.buildingDictionary.Values)
-                {                    
-                    if (building.HasBuildingPrivileges())
+                
+                foreach (BaseEntity e in BaseNetworkable.serverEntities)
+                {
+                    if (e is BuildingPrivlidge && (e as BuildingPrivlidge).IsAuthed(userID))
                     {
-                        var priv = building.buildingPrivileges.FirstOrDefault(x => x.IsAuthed(userID));
-
-                        if (priv.IsValid())
-                        {
-                            player.SendConsoleCommand("ddraw.text", 180f, Color.red, priv.transform.position, $"{userID} : {priv.buildingID}");
-                            break;
-                        }
+                        player.SendConsoleCommand("ddraw.text", 180f, Color.cyan, e.transform.position, userID);
                     }
-                    if (!building.HasBuildingBlocks()) continue;
-                    foreach (var block in building.buildingBlocks)
+                    else if (e.OwnerID == userID || e is CodeLock && (e as CodeLock).whitelistPlayers.Contains(userID))
                     {
-                        if (block.OwnerID != userID) continue;
-                        player.SendConsoleCommand("ddraw.text", 180f, Color.red, block.transform.position, $"{userID} : {block.buildingID}");
-                        break;
+                        player.SendConsoleCommand("ddraw.text", 180f, Color.red, e.transform.position, userID);
+                    }
+                    else if (e is SleepingBag && (e as SleepingBag).deployerUserID == userID)
+                    {
+                        player.SendConsoleCommand("ddraw.text", 180f, Color.green, e.transform.position, userID);
+                    }
+                    else if (e is AutoTurret && (e as AutoTurret).IsAuthed(userID))
+                    {
+                        player.SendConsoleCommand("ddraw.text", 180f, Color.blue, e.transform.position, userID);
                     }
                 }
             }
@@ -3607,7 +3628,7 @@ namespace Oxide.Plugins
             }
         }
 
-        private void DrawBuildings(BasePlayer player)
+        private void DrawBuildings(BasePlayer player, bool showNonPlayerBases)
         {
             bool isAdmin = player.IsAdmin;
 
@@ -3621,12 +3642,12 @@ namespace Oxide.Plugins
 
                 foreach (var building in BuildingManager.server.buildingDictionary.Values)
                 {
-                    if (building.HasBuildingPrivileges() || !building.HasBuildingBlocks()) continue;
+                    if (!building.HasBuildingBlocks()) continue;
                     foreach (var block in building.buildingBlocks)
                     {
-                        if (!block.OwnerID.IsSteamId()) continue;
-                        var targetName = covalence.Players.FindPlayerById(block.OwnerID.ToString())?.Name;
-                        if (string.IsNullOrEmpty(targetName)) continue;
+                        if (showNonPlayerBases && block.OwnerID.IsSteamId()) continue;
+                        if (!showNonPlayerBases  && !block.OwnerID.IsSteamId()) continue;
+                        var targetName = covalence.Players.FindPlayerById(block.OwnerID.ToString())?.Name ?? block.OwnerID.ToString();
                         player.SendConsoleCommand("ddraw.text", 180f, Color.red, block.transform.position, $"{targetName} : {block.buildingID}");
                         break;
                     }
@@ -3654,7 +3675,7 @@ namespace Oxide.Plugins
                     player.SendNetworkUpdateImmediate();
                 }
 
-                foreach (var o in BaseNetworkable.serverEntities.OfType<BaseEntity>())
+                foreach (BaseEntity o in BaseNetworkable.serverEntities)
                 {
                     if (!o.ShortPrefabName.Contains(value, CompareOptions.OrdinalIgnoreCase)) continue;
                     var distance = Mathf.FloorToInt(o.Distance(player));
@@ -3815,6 +3836,7 @@ namespace Oxide.Plugins
                 if (uiBtnHeli) list.Add("Heli");
                 if (uiBtnLoot) list.Add("Loot");
                 if (uiBtnMiniCopter) list.Add("MiniCopter");
+                if (uiBtnMLRS) list.Add("MLRS");
                 if (uiBtnNPC) list.Add("NPC");
                 if (uiBtnOre) list.Add("Ore");
                 if (uiBtnRidableHorses) list.Add("Horses");
@@ -3949,6 +3971,7 @@ namespace Oxide.Plugins
         private static bool drawTargetsVictim;
         private static bool ctNameColor;
         private static float mcDistance;
+        private static float mlrsDistance;
         private static float carDistance;
         private static float boatDistance;
         private static float adDistance;
@@ -4046,6 +4069,7 @@ namespace Oxide.Plugins
         private static bool trackCargoPlanes;
         private static bool trackCargoShips;
         private static bool trackCH47;
+        private static bool trackMLRS;
         private static bool trackRidableHorses;
         private static bool trackRigidHullInflatableBoats;
         private static bool trackBoats;
@@ -4075,6 +4099,7 @@ namespace Oxide.Plugins
         private static bool uiBtnHeli;
         private static bool uiBtnLoot;
         private static bool uiBtnMiniCopter;
+        private static bool uiBtnMLRS;
         private static bool uiBtnNPC;
         private static bool uiBtnOre;
         private static bool uiBtnRidableHorses;
@@ -4334,6 +4359,7 @@ namespace Oxide.Plugins
             groupCountHeight = Convert.ToSingle(GetConfig("Group Limit", "Height Offset [0.0 = disabled]", 40f));
 
             mcDistance = Convert.ToSingle(GetConfig("Drawing Distances", "MiniCopter", 200f));
+            mlrsDistance = Convert.ToSingle(GetConfig("Drawing Distances", "MLRS", 5000f));
             boatDistance = Convert.ToSingle(GetConfig("Drawing Distances", "Boats", 150f));
             carDistance = Convert.ToSingle(GetConfig("Drawing Distances", "Cars", 500f));
             adDistance = Convert.ToSingle(GetConfig("Drawing Distances", "Airdrop Crates", 400f));
@@ -4360,6 +4386,7 @@ namespace Oxide.Plugins
             trackCargoPlanes = Convert.ToBoolean(GetConfig("Additional Tracking", "CargoPlanes", False));
             trackCargoShips = Convert.ToBoolean(GetConfig("Additional Tracking", "CargoShips", False));
             trackMiniCopter = Convert.ToBoolean(GetConfig("Additional Tracking", "MiniCopter", False));
+            trackMLRS = Convert.ToBoolean(GetConfig("Additional Tracking", "MLRS", False));
             trackHeli = Convert.ToBoolean(GetConfig("Additional Tracking", "Helicopters", True));
             showHeliRotorHealth = Convert.ToBoolean(GetConfig("Additional Tracking", "Helicopter Rotor Health", False));
             trackCH47 = Convert.ToBoolean(GetConfig("Additional Tracking", "CH47", False));
@@ -4417,6 +4444,7 @@ namespace Oxide.Plugins
             uiBtnHeli = Convert.ToBoolean(GetConfig("GUI", "Show Button - Heli", False));
             uiBtnLoot = Convert.ToBoolean(GetConfig("GUI", "Show Button - Loot", True));
             uiBtnMiniCopter = Convert.ToBoolean(GetConfig("GUI", "Show Button - MiniCopter", False));
+            uiBtnMLRS = Convert.ToBoolean(GetConfig("GUI", "Show Button - MLRS", True));
             uiBtnNPC = Convert.ToBoolean(GetConfig("GUI", "Show Button - NPC", True));
             uiBtnOre = Convert.ToBoolean(GetConfig("GUI", "Show Button - Ore", True));
             uiBtnRidableHorses = Convert.ToBoolean(GetConfig("GUI", "Show Button - Ridable Horses", False));
@@ -4438,6 +4466,7 @@ namespace Oxide.Plugins
             if (uiBtnCH47) trackCH47 = True;
             if (uiBtnHeli) trackHeli = True;
             if (uiBtnMiniCopter) trackMiniCopter = True;
+            if (uiBtnMLRS) trackMLRS = True;
             if (uiBtnRidableHorses) trackRidableHorses = True;
             if (uiBtnRHIB) trackRigidHullInflatableBoats = True;
 

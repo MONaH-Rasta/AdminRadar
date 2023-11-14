@@ -10,12 +10,59 @@ using Oxide.Game.Rust.Cui;
 using UnityEngine;
 using Random = UnityEngine.Random;
 
+/*
+    Improved performance by removing LINQ from nearly all functions, delayed cache creation on startup, etc
+    Added 'adminradar.bypass.override' - e.g: Server owner can see all admins, but admins cannot see admins/server owner
+    Added buttons for Boats, Bradley APC, CargoShips, Cars, CH47, Heli, MiniCopter, Ridable Horses, RHIB, TCArrows
+    * TCArrows button draws the nearest authed TC of players (250m)
+    Coffins are now included in the BOX filter
+    Fixed issue which caused 'Group Limit' > 'Height Offset' (# of players per group) to not appear on the radar
+    Fixed bold text being shown for backpack contents
+    Fixed tracking admins when disabled
+    Several default config values updated
+    
+    Added config options:
+    * Customization of buttons to be shown on the GUI. View 'GUI - Show Button'
+    * 'Show Authed Count On Cupboards' (true)
+    * 'Show Bag Count On Cupboards' (true)
+    * 'Show X Items On Corpses [0 = amount only]' (0)
+    * 'Drawing Distances' > 'Tool Cupboard Arrows' (250m)
+    * 'Drawing Distances' > 'Ridable Horses' (250m)
+    * 'Additional Tracking' > 'Ridable Horses' (false)
+*/
+
 namespace Oxide.Plugins
 {
-    [Info("Admin Radar", "nivex", "4.5.7")]
+    [Info("Admin Radar", "nivex", "4.6.0")]
     [Description("Radar tool for Admins and Developers.")]
     public class AdminRadar : RustPlugin
     {
+        [PluginReference] private Plugin Vanish;
+
+        private const string permAllowed = "adminradar.allowed";
+        private const string permBypass = "adminradar.bypass";
+        private const string permAuto = "adminradar.auto";
+        private const string permBypassOverride = "adminradar.bypass.override";
+        private const string genericPrefab = "assets/prefabs/tools/map/genericradiusmarker.prefab";
+        private const string vendingPrefab = "assets/prefabs/deployable/vendingmachine/vending_mapmarker.prefab";
+        private const float flickerDelay = 0.05f;
+        private static AdminRadar ins;
+        private StoredData storedData = new StoredData();
+        private bool init; // don't use cache while false
+
+        private static readonly List<string> tags = new List<string>
+            {"ore", "cluster", "1", "2", "3", "4", "5", "6", "_", ".", "-", "deployed", "wooden", "large", "pile", "prefab", "collectable", "loot", "small"}; // strip these from names to reduce the size of the text and make it more readable
+
+        private readonly Dictionary<ulong, Color> playersColor = new Dictionary<ulong, Color>();
+        private readonly List<BasePlayer> accessList = new List<BasePlayer>();
+        private readonly Dictionary<ulong, Timer> voices = new Dictionary<ulong, Timer>();
+        private readonly Dictionary<string, Marker> markers = new Dictionary<string, Marker>();
+        private readonly List<Radar> activeRadars = new List<Radar>();
+
+        private static readonly Dictionary<ulong, SortedDictionary<float, Vector3>> trackers = new Dictionary<ulong, SortedDictionary<float, Vector3>>(); // player id, timestamp and player's position
+        private static readonly Dictionary<ulong, Timer> trackerTimers = new Dictionary<ulong, Timer>();
+        private static Cache cache = new Cache();
+
         public enum CupboardAction
         {
             Authorize,
@@ -25,21 +72,74 @@ namespace Oxide.Plugins
 
         private class Cache
         {
-            public readonly List<BaseEntity> Entities = new List<BaseEntity>();
             public readonly List<BaseNpc> Animals = new List<BaseNpc>();
             public readonly List<DroppedItemContainer> Backpacks = new List<DroppedItemContainer>();
             public readonly Dictionary<Vector3, CachedInfo> Bags = new Dictionary<Vector3, CachedInfo>();
+            public readonly List<BaseEntity> Boats = new List<BaseEntity>();
             public readonly List<BradleyAPC> BradleyAPCs = new List<BradleyAPC>();
+            public readonly List<BaseEntity> CargoShips = new List<BaseEntity>();
+            public readonly List<BaseEntity> Cars = new List<BaseEntity>();
+            public readonly List<BaseEntity> CH47 = new List<BaseEntity>();
             public readonly List<BuildingPrivlidge> Cupboards = new List<BuildingPrivlidge>();
             public readonly Dictionary<Vector3, CachedInfo> Collectibles = new Dictionary<Vector3, CachedInfo>();
             public readonly List<StorageContainer> Containers = new List<StorageContainer>();
             public readonly Dictionary<PlayerCorpse, CachedInfo> Corpses = new Dictionary<PlayerCorpse, CachedInfo>();
             public readonly List<BaseHelicopter> Helicopters = new List<BaseHelicopter>();
+            public readonly List<BaseEntity> MiniCopter = new List<BaseEntity>();
             public readonly List<BasePlayer> NPCPlayers = new List<BasePlayer>();
             public readonly Dictionary<Vector3, CachedInfo> Ores = new Dictionary<Vector3, CachedInfo>();
+            public readonly List<BaseEntity> RHIB = new List<BaseEntity>();
+            public readonly List<BaseEntity> RidableHorse = new List<BaseEntity>();
             public readonly List<SupplyDrop> SupplyDrops = new List<SupplyDrop>();
             public readonly Dictionary<Vector3, CachedInfo> Turrets = new Dictionary<Vector3, CachedInfo>();
             public readonly List<Zombie> Zombies = new List<Zombie>();
+        }
+
+        private class StoredData
+        {
+            public readonly List<string> Extended = new List<string>();
+            public readonly Dictionary<string, List<string>> Filters = new Dictionary<string, List<string>>();
+            public readonly List<string> Hidden = new List<string>();
+            public readonly List<string> OnlineBoxes = new List<string>();
+            public readonly List<string> Visions = new List<string>();
+            public StoredData() { }
+        }
+
+        private class CachedInfo
+        {
+            public object Info;
+            public string Name;
+            public double Size;
+        }
+
+        public enum EntityType
+        {
+            Active,
+            Airdrops,
+            Animals,
+            Bags,
+            Backpacks,
+            Boats,
+            Bradley,
+            Cars,
+            CargoShips,
+            CH47Helicopters,
+            Containers,
+            Collectibles,
+            Cupboards,
+            CupboardsArrow,
+            Dead,
+            GroupLimitHightlighting,
+            Heli,
+            MiniCopter,
+            Npc,
+            Ore,
+            RidableHorses,
+            RigidHullInflatableBoats,
+            Sleepers,
+            Source,            
+            Turrets,
+            Zombies
         }
 
         public class Marker : FacepunchBehaviour
@@ -79,7 +179,7 @@ namespace Oxide.Plugins
                 uid = player?.UserIDString ?? Guid.NewGuid().ToString();
                 markerName = MurdererOrScarecrow() ?? Scientist() ?? player?.displayName ?? ins.msg(entity.ShortPrefabName);
                 lastPosition = transform.position;
-                markers[uid] = this;
+                ins.markers[uid] = this;
 
                 if (IsPrivilegeMarker)
                 {
@@ -95,28 +195,21 @@ namespace Oxide.Plugins
 
                 InvokeRepeating(new Action(RefreshMarker), 1f, 1f);
             }
-            
+
+            public void DestroyIt()
+            {
+                CancelInvoke(new Action(RefreshMarker));
+                RemoveMarker();
+                ins.markers.Remove(uid);
+                Destroy(this);
+            }
+
             private void OnDestroy()
             {
                 CancelInvoke(new Action(RefreshMarker));
                 RemoveMarker();
-                markers.Remove(uid);
+                ins.markers.Remove(uid);
                 Destroy(this);
-            }
-
-            public static bool HasMarker(BaseEntity entity)
-            {
-                return markers.Values.Any(e => e.vending == entity || e.personal == entity || e.generic == entity);
-            }
-
-            public static Marker GetMarker(BaseEntity entity)
-            {
-                if (HasMarker(entity))
-                {
-                    return markers.Values.First(e => e.vending == entity || e.personal == entity || e.generic == entity);
-                }
-
-                return null;
             }
 
             public void RefreshMarker()
@@ -127,7 +220,9 @@ namespace Oxide.Plugins
                     return;
                 }
 
-                if (Vector3.Distance(entity.transform.position, lastPosition) <= markerOverlapDistance)
+                float minDistance = entity.IsNpc ? 50f : 15f;
+
+                if (Vector3.Distance(entity.transform.position, lastPosition) <= minDistance)
                 {
                     return;
                 }
@@ -152,7 +247,7 @@ namespace Oxide.Plugins
 
                 CreateMarker();
             }
-            
+
             public void CreateMarker()
             {
                 RemoveMarker();
@@ -181,7 +276,7 @@ namespace Oxide.Plugins
                     generic.SendUpdate();
                 }
             }
-            
+
             public void CreatePrivilegeMarker(string newMarkerName)
             {
                 if (privilege == null || privilege.transform == null || privilege.IsDestroyed)
@@ -233,6 +328,7 @@ namespace Oxide.Plugins
                 if (generic != null && !generic.IsDestroyed)
                 {
                     generic.Kill();
+                    generic.SendUpdate();
                 }
 
                 if (personal != null && !personal.IsDestroyed)
@@ -260,6 +356,8 @@ namespace Oxide.Plugins
                         return wolfColor;
                     case "stag":
                         return stagColor;
+                    case "testridablehorse":
+                    case "ridablehorse":
                     case "horse":
                         return horseColor;
                     case "murderer":
@@ -293,14 +391,17 @@ namespace Oxide.Plugins
 
                 sb.AppendLine(markerName);
 
-                foreach (var marker in markers.Values.Where(t => t != this && !string.IsNullOrEmpty(t.markerName) && Vector3.Distance(t.lastPosition, lastPosition) <= markerOverlapDistance).ToList())
+                foreach (var marker in ins.markers.Values)
                 {
-                    if (marker.IsPrivilegeMarker)
+                    if (marker != this && !string.IsNullOrEmpty(marker.markerName) && Vector3.Distance(marker.lastPosition, lastPosition) <= markerOverlapDistance)
                     {
-                        sb.AppendLine(ins.msg("TC"));
-                        sb.AppendLine($"> {marker.markerName}");
+                        if (marker.IsPrivilegeMarker)
+                        {
+                            sb.AppendLine(ins.msg("TC"));
+                            sb.AppendLine($"> {marker.markerName}");
+                        }
+                        else sb.AppendLine(marker.markerName);
                     }
-                    else sb.AppendLine(marker.markerName);
                 }
 
                 sb.Length--;
@@ -342,7 +443,7 @@ namespace Oxide.Plugins
                 {
                     var lastPos = trackers[uid].Values.ElementAt(trackers[uid].Count - 1); // get the last position the player was at
 
-                    if (Vector3.Distance(lastPos, transform.position) <= 1f) // check the distance against the minimum requirement. without this the dictionary will accumulate thousands of entries
+                    if (Vector3.Distance(lastPos, transform.position) <= 1f) // min distance to reduce size of dictionary
                         return;
                 }
 
@@ -378,23 +479,6 @@ namespace Oxide.Plugins
             }
         }
 
-        private class StoredData
-        {
-            public readonly List<string> Extended = new List<string>();
-            public readonly Dictionary<string, List<string>> Filters = new Dictionary<string, List<string>>();
-            public readonly List<string> Hidden = new List<string>();
-            public readonly List<string> OnlineBoxes = new List<string>();
-            public readonly List<string> Visions = new List<string>();
-            public StoredData() { }
-        }
-
-        private class CachedInfo
-        {
-            public object Info;
-            public string Name;
-            public double Size;
-        }
-
         private class Radar : FacepunchBehaviour
         {
             private readonly List<BasePlayer> distantPlayers = new List<BasePlayer>();
@@ -408,57 +492,39 @@ namespace Oxide.Plugins
             private Vector3 position;
 
             private bool setSource = true;
-            private bool showActive = true;
             public bool showBags;
+            public bool showBoats;
             public bool showBox;
+            public bool showBradley;
+            public bool showCars;
+            public bool showCargoShips;
+            public bool showCH47;
             public bool showCollectible;
             public bool showDead;
+            public bool showHeli;
             public bool showHT;
-            private bool showLimits = true;
             public bool showLoot;
+            public bool showMiniCopter;
             public bool showNPC;
             public bool showOre;
+            public bool showRidableHorses;
+            public bool showRHIB;
             public bool showSleepers;
             public bool showStash;
             public bool showTC;
+            public bool showTCArrow;
             public bool showTurrets;
+            public bool showAll;
             private BaseEntity source;
-
-            private enum EntityType
-            {
-                Active,
-                Airdrops,
-                Animals,
-                Bags,
-                Backpacks,
-                Boats,
-                Bradley,
-                Cars,
-                CargoShips,
-                CH47Helicopters,
-                Containers,
-                Collectibles,
-                Cupboards,
-                Dead,
-                GroupLimitHightlighting,
-                Heli,
-                MiniCopter,
-                Npc,
-                Ore,
-                RigidHullInflatableBoats,
-                Sleepers,
-                Source,
-                Turrets,
-                Zombies
-            }
+            private DateTime tick;
 
             private void Awake()
             {
-                activeRadars.Add(this);
+                ins.activeRadars.Add(this);
                 player = GetComponent<BasePlayer>();
                 source = player;
                 position = player.transform.position;
-
+                
                 if (inactiveSeconds > 0f || inactiveMinutes > 0)
                     InvokeRepeating(Activity, 0f, 1f);
             }
@@ -479,12 +545,65 @@ namespace Oxide.Plugins
                     CancelInvoke(Activity);
 
                 CancelInvoke(DoRadar);
-                activeRadars.Remove(this);
+                ins.activeRadars.Remove(this);
                 player.ChatMessage(ins.msg("Deactivated", player.UserIDString));
                 Destroy(this);
             }
 
-            private bool LatencyAccepted(DateTime tick)
+            public bool GetBool(string value)
+            {
+                switch (value)
+                {
+                    case "All":
+                        return showAll;
+                    case "Bags":
+                        return showBags;
+                    case "Boats":
+                        return showBoats;
+                    case "Box":
+                        return showBox;
+                    case "Bradley":
+                        return showBradley;
+                    case "CargoShips":
+                        return showCargoShips;
+                    case "Cars":
+                        return showCars;
+                    case "CH47":
+                        return showCH47;
+                    case "Collectibles":
+                        return showCollectible;
+                    case "Dead":
+                        return showDead;
+                    case "Heli":
+                        return showHeli;
+                    case "Loot":
+                        return showLoot;
+                    case "MiniCopter":
+                        return showMiniCopter;
+                    case "NPC":
+                        return showNPC;
+                    case "Ore":
+                        return showOre;
+                    case "RidableHorses":
+                        return showRidableHorses;
+                    case "RHIB":
+                        return showRHIB;
+                    case "Sleepers":
+                        return showSleepers;
+                    case "Stash":
+                        return showStash;
+                    case "TCArrows":
+                        return showTCArrow;
+                    case "TC":
+                        return showTC;
+                    case "Turrets":
+                        return showTurrets;
+                    default:
+                        return false;
+                }
+            }
+
+            private bool LatencyAccepted()
             {
                 if (latencyMs > 0)
                 {
@@ -519,7 +638,7 @@ namespace Oxide.Plugins
 
             private void DoRadar()
             {
-                var tick = DateTime.Now;
+                tick = DateTime.Now;
                 bool isAdmin = player.IsAdmin;
 
                 try
@@ -532,7 +651,7 @@ namespace Oxide.Plugins
 
                     drawnObjects = 0;
 
-                    if (!isAdmin && ins.permission.UserHasPermission(player.UserIDString, permName))
+                    if (!isAdmin && ins.permission.UserHasPermission(player.UserIDString, permAllowed))
                     {
                         player.SetPlayerFlag(BasePlayer.PlayerFlags.IsAdmin, true);
                         player.SendNetworkUpdateImmediate();
@@ -541,64 +660,67 @@ namespace Oxide.Plugins
                     if (!SetSource())
                         return;
 
-                    if (!ShowActive(tick))
+                    if (!ShowActive())
                         return;
 
-                    if (!ShowSleepers(tick))
+                    if (!ShowSleepers())
                         return;
 
                     if (barebonesMode)
                         return;
 
-                    if (!ShowEntity(tick, EntityType.Cars, trackCars))
+                    if (!ShowEntity(EntityType.Cars, showCars, "C", cache.Cars))
                         return;
 
-                    if (!ShowEntity(tick, EntityType.CargoShips, trackCargoShips))
+                    if (!ShowEntity(EntityType.CargoShips, showCargoShips, "CS", cache.CargoShips))
                         return;
 
-                    if (!ShowHeli(tick))
+                    if (!ShowHeli())
                         return;
 
-                    if (!ShowBradley(tick))
+                    if (!ShowBradley())
                         return;
 
-                    if (!ShowLimits(tick))
+                    if (!ShowLimits())
                         return;
 
-                    if (!ShowTC(tick))
+                    if (!ShowTC())
                         return;
 
-                    if (!ShowContainers(tick))
+                    if (!ShowContainers())
                         return;
 
-                    if (!ShowBags(tick))
+                    if (!ShowBags())
                         return;
 
-                    if (!ShowTurrets(tick))
+                    if (!ShowTurrets())
                         return;
 
-                    if (!ShowDead(tick))
+                    if (!ShowDead())
                         return;
 
-                    if (!ShowNPC(tick))
+                    if (!ShowNPC())
                         return;
 
-                    if (!ShowOre(tick))
+                    if (!ShowOre())
+                        return;
+                    
+                    if (!ShowEntity(EntityType.CH47Helicopters, showCH47, "CH47", cache.CH47))
                         return;
 
-                    if (!ShowEntity(tick, EntityType.CH47Helicopters, trackCH47))
+                    if (!ShowEntity(EntityType.RigidHullInflatableBoats, showRHIB, "RHIB", cache.RHIB))
                         return;
 
-                    if (!ShowEntity(tick, EntityType.RigidHullInflatableBoats, trackRigidHullInflatableBoats))
+                    if (!ShowEntity(EntityType.Boats, showBoats, "RB", cache.Boats))
                         return;
 
-                    if (!ShowEntity(tick, EntityType.Boats, trackBoats))
+                    if (!ShowEntity(EntityType.MiniCopter, showMiniCopter, "MC", cache.MiniCopter))
                         return;
 
-                    if (!ShowEntity(tick, EntityType.MiniCopter, trackMiniCopter))
+                    if (!ShowEntity(EntityType.RidableHorses, showRidableHorses, "RH", cache.RidableHorse))
                         return;
 
-                    ShowCollectables(tick);
+                    ShowCollectables();
                 }
                 catch (Exception ex)
                 {
@@ -609,49 +731,73 @@ namespace Oxide.Plugins
                     {
                         case EntityType.Active:
                             {
-                                showActive = false;
+                                trackActive = false;
                             }
                             break;
                         case EntityType.Airdrops:
                             {
-                                showBox = false;
+                                trackSupplyDrops = false;
+                                cache.SupplyDrops.Clear();
                             }
                             break;
                         case EntityType.Animals:
                         case EntityType.Npc:
                         case EntityType.Zombies:
                             {
+                                trackNPC = false;
                                 showNPC = false;
+                                uiBtnNPC = false;
+                                cache.Animals.Clear();
+                                cache.Zombies.Clear();
+                                cache.NPCPlayers.Clear();
                             }
                             break;
                         case EntityType.Bags:
                             {
+                                trackBags = false;
                                 showBags = false;
+                                uiBtnBags = false;
+                                cache.Bags.Clear();
                             }
                             break;
                         case EntityType.Backpacks:
                             {
+                                trackLoot = false;
                                 showLoot = false;
+                                uiBtnLoot = false;
+                                cache.Backpacks.Clear();
                             }
                             break;
                         case EntityType.Bradley:
                             {
+                                showBradley = false;
+                                uiBtnBradley = false;
                                 trackBradley = false;
+                                cache.BradleyAPCs.Clear();
                             }
                             break;
                         case EntityType.Cars:
                             {
+                                showCars = false;
+                                uiBtnCars = false;
                                 trackCars = false;
+                                cache.Cars.Clear();
                             }
                             break;
                         case EntityType.CargoShips:
                             {
                                 trackCargoShips = false;
+                                showCargoShips = false;
+                                uiBtnCargoShips = false;
+                                cache.CargoShips.Clear();
                             }
                             break;
                         case EntityType.CH47Helicopters:
                             {
+                                showCH47 = false;
+                                uiBtnCH47 = false;
                                 trackCH47 = false;
+                                cache.CH47.Clear();
                             }
                             break;
                         case EntityType.Containers:
@@ -659,56 +805,103 @@ namespace Oxide.Plugins
                                 showBox = false;
                                 showLoot = false;
                                 showStash = false;
+                                uiBtnBox = false;
+                                uiBtnLoot = false;
+                                uiBtnStash = false;
+                                trackBox = false;
+                                trackLoot = false;
+                                trackStash = false;
+                                cache.Containers.Clear();
                             }
                             break;
                         case EntityType.Collectibles:
                             {
+                                trackCollectibles = false;
                                 showCollectible = false;
+                                uiBtnCollectible = false;
+                                cache.Collectibles.Clear();
                             }
                             break;
                         case EntityType.Cupboards:
                             {
+                                trackTC = false;
                                 showTC = false;
+                                uiBtnTC = false;
+                                cache.Cupboards.Clear();
+                            }
+                            break;
+                        case EntityType.CupboardsArrow:
+                            {
+                                showTCArrow = false;
+                                uiBtnTCArrow = false;
                             }
                             break;
                         case EntityType.Dead:
                             {
+                                trackDead = false;
                                 showDead = false;
+                                uiBtnDead = false;
+                                cache.Corpses.Clear();
                             }
                             break;
                         case EntityType.GroupLimitHightlighting:
                             {
-                                showLimits = false;
+                                drawX = false;
                             }
                             break;
                         case EntityType.Heli:
                             {
+                                showHeli = false;
+                                uiBtnHeli = false;
                                 trackHeli = false;
+                                cache.Helicopters.Clear();
                             }
                             break;
                         case EntityType.MiniCopter:
                             {
+                                showMiniCopter = false;
+                                uiBtnMiniCopter = false;
                                 trackMiniCopter = false;
+                                cache.MiniCopter.Clear();
                             }
                             break;
                         case EntityType.Ore:
                             {
+                                trackOre = false;
                                 showOre = false;
+                                uiBtnOre = false;
+                                cache.Ores.Clear();
+                            }
+                            break;
+                        case EntityType.RidableHorses:
+                            {
+                                showRidableHorses = false;
+                                uiBtnRidableHorses = false;
+                                trackRidableHorses = false;
+                                cache.RidableHorse.Clear();
                             }
                             break;
                         case EntityType.RigidHullInflatableBoats:
                             {
+                                showRHIB = false;
+                                uiBtnRHIB = false;
                                 trackRigidHullInflatableBoats = false;
+                                cache.RHIB.Clear();
                             }
                             break;
                         case EntityType.Boats:
                             {
+                                showBoats = false;
+                                uiBtnBoats = false;
                                 trackBoats = false;
+                                cache.Boats.Clear();
                             }
                             break;
                         case EntityType.Sleepers:
                             {
+                                trackSleepers = false;
                                 showSleepers = false;
+                                uiBtnSleepers = false;
                             }
                             break;
                         case EntityType.Source:
@@ -718,10 +911,16 @@ namespace Oxide.Plugins
                             break;
                         case EntityType.Turrets:
                             {
+                                trackTurrets = false;
                                 showTurrets = false;
+                                uiBtnTurrets = false;
+                                cache.Turrets.Clear();
                             }
                             break;
                     }
+
+                    uiBtnNames = new string[0];
+                    uiButtons = null;
                 }
                 finally
                 {
@@ -731,7 +930,7 @@ namespace Oxide.Plugins
                         player.SendNetworkUpdateImmediate();
                     }
 
-                    if (!LatencyAccepted(tick))
+                    if (!LatencyAccepted())
                     {
                         double ms = (DateTime.Now - tick).TotalMilliseconds;
                         string message = ins.msg("DoESP", player.UserIDString, ms, latencyMs);
@@ -739,6 +938,37 @@ namespace Oxide.Plugins
                         Destroy(this);
                     }
                 }
+            }
+
+            private Vector3 GetNearestCupboard(BasePlayer target)
+            {
+                var positions = new List<Vector3>();
+                float distance = 0f;
+
+                foreach (var tc in cache.Cupboards)
+                {
+                    if (tc.IsAuthed(target))
+                    {
+                        distance = Vector3.Distance(target.transform.position, tc.transform.position);
+
+                        if (distance >= 5f && distance <= tcArrowsDistance)
+                        {
+                            positions.Add(tc.transform.position);
+                        }
+                    }
+                }
+
+                if (positions.Count == 0)
+                {
+                    return Vector3.zero;
+                }
+
+                if (positions.Count > 1)
+                {
+                    positions.Sort((x, y) => Vector3.Distance(x, target.transform.position).CompareTo(Vector3.Distance(y, target.transform.position)));
+                }
+
+                return positions[0];
             }
 
             private bool SetSource()
@@ -772,35 +1002,48 @@ namespace Oxide.Plugins
                 return true;
             }
 
-            private bool ShowActive(DateTime tick)
+            private bool ShowActive()
             {
-                if (!showActive)
+                if (!trackActive)
                     return true;
 
                 entityType = EntityType.Active;
+                double currDistance;
+                Color color;
+                List<Item> itemList;
 
-                foreach (var target in BasePlayer.activePlayerList.Where(target => target != null && target.transform != null && target.IsConnected))
+                foreach (var target in BasePlayer.activePlayerList)
                 {
-                    double currDistance = Math.Floor(Vector3.Distance(target.transform.position, source.transform.position));
-
-                    if (player == target || currDistance > maxDistance || ins.permission.UserHasPermission(target.UserIDString, permBypass))
+                    if (target == null || target.transform == null || !target.IsConnected)
                     {
                         continue;
                     }
 
-                    var color = __(target.IsAlive() ? activeCC : activeDeadCC);
+                    currDistance = Math.Floor(Vector3.Distance(target.transform.position, source.transform.position));
+
+                    if (player == target || currDistance > maxDistance)
+                    {                        
+                        continue;
+                    }
+
+                    if (ins.permission.UserHasPermission(target.UserIDString, permBypass) && !ins.permission.UserHasPermission(player.UserIDString, permBypassOverride))
+                    {
+                        continue;
+                    }
+
+                    color = __(target.IsAlive() ? activeCC : activeDeadCC);
 
                     if (currDistance < playerDistance)
                     {
                         string extText = string.Empty;
 
-                        if (storedData.Extended.Contains(player.UserIDString))
+                        if (ins.storedData.Extended.Contains(player.UserIDString))
                         {
                             extText = target.GetActiveItem()?.info.displayName.translated ?? string.Empty;
 
                             if (!string.IsNullOrEmpty(extText))
                             {
-                                var itemList = target.GetHeldEntity()?.GetComponent<BaseProjectile>()?.GetItem()?.contents?.itemList;
+                                itemList = target.GetHeldEntity()?.GetComponent<BaseProjectile>()?.GetItem()?.contents?.itemList;
 
                                 if (itemList?.Count > 0)
                                 {
@@ -817,14 +1060,15 @@ namespace Oxide.Plugins
                         string vanished = ins.Vanish != null && target.IPlayer.HasPermission("vanish.use") && (bool)ins.Vanish.Call("IsInvisible", target) ? "<color=#FF00FF>V</color>" : string.Empty;
                         string health = showHT && target.metabolism != null ? string.Format("{0} <color=#FFA500>{1}</color>:<color=#FFADD8E6>{2}</color>", Math.Floor(target.health), target.metabolism.calories.value.ToString("#0"), target.metabolism.hydration.value.ToString("#0")) : Math.Floor(target.health).ToString("#0");
 
-                        if (storedData.Visions.Contains(player.UserIDString)) DrawVision(player, target, invokeTime);
+                        if (ins.storedData.Visions.Contains(player.UserIDString)) DrawVision(player, target, invokeTime);
                         if (drawArrows) player.SendConsoleCommand("ddraw.arrow", invokeTime + flickerDelay, __(colorDrawArrows), target.transform.position + new Vector3(0f, target.transform.position.y + 10), target.transform.position, 1);
                         if (drawText) player.SendConsoleCommand("ddraw.text", invokeTime + flickerDelay, color, target.transform.position + new Vector3(0f, 2f, 0f), string.Format("{0} <color={1}>{2}</color> <color={3}>{4}</color>{5} {6}", ins.RemoveFormatting(target.displayName) ?? target.userID.ToString(), healthCC, health, distCC, currDistance, vanished, extText));
                         if (drawBox) player.SendConsoleCommand("ddraw.box", invokeTime + flickerDelay, color, target.transform.position + new Vector3(0f, 1f, 0f), target.GetHeight(target.modelState.ducked));
-                        if (voices.ContainsKey(target.userID) && Vector3.Distance(target.transform.position, player.transform.position) <= voiceDistance)
+                        if (ins.voices.ContainsKey(target.userID) && Vector3.Distance(target.transform.position, source.transform.position) <= voiceDistance)
                         {
                             player.SendConsoleCommand("ddraw.arrow", invokeTime + flickerDelay, Color.yellow, target.transform.position + new Vector3(0f, 2.5f, 0f), target.transform.position, 1);
                         }
+                        ShowCupboardArrows(target, EntityType.Active);
                     }
                     else if (drawX)
                         distantPlayers.Add(target);
@@ -835,19 +1079,24 @@ namespace Oxide.Plugins
                         return false;
                 }
 
-                return LatencyAccepted(tick);
+                return LatencyAccepted();
             }
 
-            private bool ShowSleepers(DateTime tick)
+            private bool ShowSleepers()
             {
-                if (!showSleepers)
+                if (!showSleepers || !trackSleepers)
                     return true;
 
                 entityType = EntityType.Sleepers;
-
-                foreach (var sleeper in BasePlayer.sleepingPlayerList.Where(target => target != null && target.transform != null))
+                double currDistance;
+                Color color;
+                
+                foreach (var sleeper in BasePlayer.sleepingPlayerList)
                 {
-                    double currDistance = Math.Floor(Vector3.Distance(sleeper.transform.position, source.transform.position));
+                    if (sleeper == null || sleeper.transform == null)
+                        continue;
+
+                    currDistance = Math.Floor(Vector3.Distance(sleeper.transform.position, source.transform.position));
 
                     if (currDistance > maxDistance)
                         continue;
@@ -855,33 +1104,54 @@ namespace Oxide.Plugins
                     if (currDistance < playerDistance)
                     {
                         string health = showHT && sleeper.metabolism != null ? string.Format("{0} <color=#FFA500>{1}</color>:<color=#FFADD8E6>{2}</color>", Math.Floor(sleeper.health), sleeper.metabolism.calories.value.ToString("#0"), sleeper.metabolism.hydration.value.ToString("#0")) : Math.Floor(sleeper.health).ToString("#0");
-                        var color = __(sleeper.IsAlive() ? sleeperCC : sleeperDeadCC);
+                        color = __(sleeper.IsAlive() ? sleeperCC : sleeperDeadCC);
 
                         if (drawArrows) player.SendConsoleCommand("ddraw.arrow", invokeTime + flickerDelay, __(colorDrawArrows), sleeper.transform.position + new Vector3(0f, sleeper.transform.position.y + 10), sleeper.transform.position, 1);
                         if (drawText) player.SendConsoleCommand("ddraw.text", invokeTime + flickerDelay, color, sleeper.transform.position, string.Format("{0} <color={1}>{2}</color> <color={3}>{4}</color>", ins.RemoveFormatting(sleeper.displayName) ?? sleeper.userID.ToString(), healthCC, health, distCC, currDistance));
                         if (drawX) player.SendConsoleCommand("ddraw.text", invokeTime + flickerDelay, color, sleeper.transform.position + new Vector3(0f, 1f, 0f), "X");
                         else if (drawBox) player.SendConsoleCommand("ddraw.box", invokeTime + flickerDelay, color, sleeper.transform.position, GetScale(currDistance));
+                        ShowCupboardArrows(sleeper, EntityType.Sleepers);
                     }
                     else player.SendConsoleCommand("ddraw.box", invokeTime + flickerDelay, Color.cyan, sleeper.transform.position + new Vector3(0f, 1f, 0f), 5f);
 
                     if (objectsLimit > 0 && ++drawnObjects > objectsLimit) return false;
                 }
 
-                return LatencyAccepted(tick);
+                return LatencyAccepted();
             }
 
-            private bool ShowHeli(DateTime tick)
+            private void ShowCupboardArrows(BasePlayer target, EntityType lastType)
             {
-                if (!trackHeli)
+                if (!barebonesMode && showTCArrow && uiBtnTCArrow && uiBtnTC)
+                {
+                    entityType = EntityType.CupboardsArrow;
+                    var nearest = GetNearestCupboard(target);
+
+                    if (nearest != Vector3.zero)
+                    {
+                        player.SendConsoleCommand("ddraw.arrow", invokeTime + flickerDelay, __(tcCC), target.transform.position + new Vector3(0f, 0.115f, 0f), nearest, 0.25f);
+                    }
+
+                    entityType = lastType;
+                }
+            }
+
+            private bool ShowHeli()
+            {
+                if (!showHeli || (!trackHeli && !uiBtnHeli))
                     return true;
 
                 entityType = EntityType.Heli;
-
+                double currDistance;
+                
                 if (cache.Helicopters.Count > 0)
                 {
-                    foreach (var heli in cache.Helicopters.Where(target => target != null && target.transform != null && !target.IsDestroyed))
+                    foreach (var heli in cache.Helicopters)
                     {
-                        double currDistance = Math.Floor(Vector3.Distance(heli.transform.position, source.transform.position));
+                        if (heli == null || heli.transform == null || heli.IsDestroyed)
+                            continue;
+
+                        currDistance = Math.Floor(Vector3.Distance(heli.transform.position, source.transform.position));
                         string heliHealth = heli.health > 1000 ? Math.Floor(heli.health).ToString("#,##0,K", CultureInfo.InvariantCulture) : Math.Floor(heli.health).ToString("#0");
                         string info = showHeliRotorHealth ? string.Format("<color={0}>{1}</color> (<color=#FFFF00>{2}</color>/<color=#FFFF00>{3}</color>)", healthCC, heliHealth, Math.Floor(heli.weakspots[0].health), Math.Floor(heli.weakspots[1].health)) : string.Format("<color={0}>{1}</color>", healthCC, heliHealth);
 
@@ -891,21 +1161,25 @@ namespace Oxide.Plugins
                     }
                 }
 
-                return LatencyAccepted(tick);
+                return LatencyAccepted();
             }
 
-            private bool ShowBradley(DateTime tick)
+            private bool ShowBradley()
             {
-                if (!trackBradley)
+                if (!showBradley || (!uiBtnBradley && !trackBradley))
                     return true;
 
                 entityType = EntityType.Bradley;
-
+                double currDistance;
+                
                 if (cache.BradleyAPCs.Count > 0)
                 {
-                    foreach (var bradley in cache.BradleyAPCs.Where(target => target != null && target.transform != null && !target.IsDestroyed))
+                    foreach (var bradley in cache.BradleyAPCs)
                     {
-                        double currDistance = Math.Floor(Vector3.Distance(bradley.transform.position, source.transform.position));
+                        if (bradley == null || bradley.transform == null || bradley.IsDestroyed)
+                            continue;
+
+                        currDistance = Math.Floor(Vector3.Distance(bradley.transform.position, source.transform.position));
                         string info = string.Format("<color={0}>{1}</color>", healthCC, bradley.health > 1000 ? Math.Floor(bradley.health).ToString("#,##0,K", CultureInfo.InvariantCulture) : Math.Floor(bradley.health).ToString());
 
                         if (drawText) player.SendConsoleCommand("ddraw.text", invokeTime + flickerDelay, __(bradleyCC), bradley.transform.position + new Vector3(0f, 2f, 0f), string.Format("B {0} <color={1}>{2}</color>", info, distCC, currDistance));
@@ -914,117 +1188,189 @@ namespace Oxide.Plugins
                     }
                 }
 
-                return LatencyAccepted(tick);
+                return LatencyAccepted();
             }
 
-            private bool ShowLimits(DateTime tick)
+            private bool ShowLimits()
             {
-                if (!showLimits)
+                if (!drawX)
                     return true;
 
                 entityType = EntityType.GroupLimitHightlighting;
-
+                Dictionary<int, List<BasePlayer>> groupedPlayers;
+                
                 if (distantPlayers.Count > 0)
                 {
-                    var dict = new Dictionary<int, List<BasePlayer>>();
+                    distantPlayers.RemoveAll(p => p == null || p.transform == null || !p.IsConnected);
+
+                    groupedPlayers = new Dictionary<int, List<BasePlayer>>();
+                    List<BasePlayer> players;
+                    bool foundPlayer = false;
 
                     foreach (var target in distantPlayers.ToList())
                     {
-                        var list = distantPlayers.Where(x => Vector3.Distance(x.transform.position, target.transform.position) < groupRange && !dict.Any(y => y.Value.Contains(x))).ToList();
+                        players = new List<BasePlayer>();
 
-                        if (list.Count() >= groupLimit)
+                        foreach (var player in distantPlayers)
+                        {
+                            if (Vector3.Distance(player.transform.position, target.transform.position) < groupRange)
+                            {
+                                foundPlayer = false;
+
+                                foreach(var list in groupedPlayers.Values)
+                                {
+                                    if (list.Contains(player))
+                                    {
+                                        foundPlayer = true;
+                                        break;
+                                    }
+                                }
+
+                                if (!foundPlayer)
+                                {
+                                    players.Add(player);
+                                }
+                            }
+                        }
+                        
+                        if (players.Count >= groupLimit)
                         {
                             int index = 0;
 
-                            while (dict.ContainsKey(index))
+                            while (groupedPlayers.ContainsKey(index))
                                 index++;
 
-                            dict.Add(index, list);
-                            distantPlayers.RemoveAll(x => list.Contains(x));
+                            groupedPlayers.Add(index, players);
+                            distantPlayers.RemoveAll(x => players.Contains(x));
                         }
                     }
 
                     foreach (var target in distantPlayers)
+                    {
                         player.SendConsoleCommand("ddraw.text", invokeTime + flickerDelay, target.IsAlive() ? Color.green : Color.red, target.transform.position + new Vector3(0f, 1f, 0f), "X");
+                    }
 
-                    foreach (var entry in dict)
+                    foreach (var entry in groupedPlayers)
                     {
                         foreach (var target in entry.Value)
                         {
                             player.SendConsoleCommand("ddraw.text", invokeTime + flickerDelay, __(target.IsAlive() ? GetGroupColor(entry.Key) : groupColorDead), target.transform.position + new Vector3(0f, 1f, 0f), "X");
                         }
 
-                        if (groupCountHeight > 0f)
+                        if (groupCountHeight != 0f)
                         {
-                            player.SendConsoleCommand("ddraw.text", invokeTime + flickerDelay, Color.magenta, entry.Value.First().transform.position + new Vector3(0f, groupCountHeight, 0f), entry.Value.Count.ToString());
+                            player.SendConsoleCommand("ddraw.text", invokeTime + flickerDelay, Color.magenta, entry.Value[0].transform.position + new Vector3(0f, groupCountHeight, 0f), entry.Value.Count.ToString());
                         }
                     }
 
                     distantPlayers.Clear();
-                    dict.Clear();
+                    groupedPlayers.Clear();
                 }
 
-                return LatencyAccepted(tick);
+                return LatencyAccepted();
             }
 
-            private bool ShowTC(DateTime tick)
+            private bool ShowTC()
             {
-                if (!showTC)
+                if (!showTC || !trackTC)
                     return true;
 
                 entityType = EntityType.Cupboards;
+                double currDistance;
+                string text;
+                int bags;
 
-                foreach (var tc in cache.Cupboards.Where(target => target != null && target.transform != null && !target.IsDestroyed))
+                foreach (var tc in cache.Cupboards)
                 {
-                    double currDistance = Math.Floor(Vector3.Distance(tc.transform.position, source.transform.position));
+                    if (tc == null || tc.transform == null || tc.IsDestroyed)
+                        continue;
+
+                    currDistance = Math.Floor(Vector3.Distance(tc.transform.position, source.transform.position));
 
                     if (currDistance < tcDistance && currDistance < maxDistance)
                     {
-                        if (drawText) player.SendConsoleCommand("ddraw.text", invokeTime + flickerDelay, __(tcCC), tc.transform.position + new Vector3(0f, 0.5f, 0f), string.Format("TC <color={0}>{1}</color>", distCC, currDistance));
+                        if (drawText)
+                        {
+                            bags = 0;
+
+                            if (showTCBagCount)
+                            {
+                                var building = tc.GetBuilding();
+
+                                if (building != null)
+                                {
+                                    foreach(var entity in building.decayEntities)
+                                    {
+                                        if (entity is SleepingBag)
+                                        {
+                                            bags++;
+                                        }
+                                    }
+                                }
+                            }
+
+                            if (bags > 0 && showTCAuthedCount) text = string.Format("TC <color={0}>{1}</color> <color={2}>{3}</color> <color={4}>{5}</color>", distCC, currDistance, bagCC, bags, tcCC, tc.authorizedPlayers.Count);
+                            else if (bags > 0) text = string.Format("TC <color={0}>{1}</color> <color={2}>{3}</color>", distCC, currDistance, bagCC, bags);
+                            else if (showTCAuthedCount) text = string.Format("TC <color={0}>{1}</color> <color={2}>{3}</color>", distCC, currDistance, tcCC, tc.authorizedPlayers.Count);
+                            else text = string.Format("TC <color={0}>{1}</color>", distCC, currDistance);
+
+                            player.SendConsoleCommand("ddraw.text", invokeTime + flickerDelay, __(tcCC), tc.transform.position + new Vector3(0f, 0.5f, 0f), text);
+                        }
+
                         if (drawBox) player.SendConsoleCommand("ddraw.box", invokeTime + flickerDelay, __(tcCC), tc.transform.position + new Vector3(0f, 0.5f, 0f), 3f);
                         if (objectsLimit > 0 && ++drawnObjects > objectsLimit) return false;
                     }
                 }
 
-                return LatencyAccepted(tick);
+                return LatencyAccepted();
             }
 
-            private bool ShowContainers(DateTime tick)
+            private bool ShowContainers()
             {
                 if (!showBox && !showLoot && !showStash)
                 {
                     return true;
                 }
 
+                double currDistance;
+                bool isBox;
+                bool isLoot;
+
                 if (showLoot)
                 {
                     entityType = EntityType.Backpacks;
 
-                    foreach (var backpack in cache.Backpacks.Where(target => target != null && target.transform != null && !target.IsDestroyed))
+                    foreach (var backpack in cache.Backpacks)
                     {
-                        double currDistance = Math.Floor(Vector3.Distance(backpack.transform.position, source.transform.position));
+                        if (backpack == null || backpack.transform == null || backpack.IsDestroyed)
+                            continue;
+
+                        currDistance = Math.Floor(Vector3.Distance(backpack.transform.position, source.transform.position));
 
                         if (currDistance > maxDistance || currDistance > lootDistance)
                             continue;
 
-                        string contents = backpack.inventory?.itemList != null ? string.Format("({0}) ", backpackContentAmount > 0 && backpack.inventory.itemList.Count > 0 ? string.Join(", ", backpack.inventory.itemList.Take(backpackContentAmount).Select(item => string.Format("{0} ({1})", item.info.displayName.translated.ToLower(), item.amount)).ToArray()) : backpack.inventory.itemList.Count().ToString()) : string.Empty;
-                        if (drawText) player.SendConsoleCommand("ddraw.text", invokeTime + flickerDelay, __(backpackCC), backpack.transform.position + new Vector3(0f, 0.5f, 0f), string.Format("{0} <color={1}>{2}</color><color={3}>{4}</color>", string.IsNullOrEmpty(backpack._playerName) ? ins.msg("backpack", player.UserIDString) : backpack._playerName, backpackCC, contents, distCC, currDistance));
+                        if (drawText) player.SendConsoleCommand("ddraw.text", invokeTime + flickerDelay, __(backpackCC), backpack.transform.position + new Vector3(0f, 0.5f, 0f), string.Format("{0} {1}<color={2}>{3}</color>", string.IsNullOrEmpty(backpack._playerName) ? ins.msg("backpack", player.UserIDString) : backpack._playerName, GetContents(backpack), distCC, currDistance));
                         if (drawBox) player.SendConsoleCommand("ddraw.box", invokeTime + flickerDelay, __(backpackCC), backpack.transform.position + new Vector3(0f, 0.5f, 0f), GetScale(currDistance));
                         if (objectsLimit > 0 && ++drawnObjects > objectsLimit) return false;
                     }
                 }
 
-                if (showBox)
+                if (showBox && trackSupplyDrops)
                 {
                     entityType = EntityType.Airdrops;
-                    foreach (var drop in cache.SupplyDrops.Where(target => target != null && target.transform != null && !target.IsDestroyed))
+
+                    foreach (var drop in cache.SupplyDrops)
                     {
-                        double currDistance = Math.Floor(Vector3.Distance(drop.transform.position, source.transform.position));
+                        if (drop == null || drop.transform == null || drop.IsDestroyed)
+                            continue;
+
+                        currDistance = Math.Floor(Vector3.Distance(drop.transform.position, source.transform.position));
 
                         if (currDistance > maxDistance || currDistance > adDistance)
                             continue;
 
-                        string contents = showAirdropContents && drop.inventory.itemList.Count > 0 ? string.Format("({0}) ", string.Join(", ", drop.inventory.itemList.Select(item => string.Format("{0} ({1})", item.info.displayName.translated.ToLower(), item.amount)).ToArray())) : string.Format("({0}) ", drop.inventory.itemList.Count());
+                        string contents = showAirdropContents && drop.inventory.itemList.Count > 0 ? string.Format("({0}) ", string.Join(", ", drop.inventory.itemList.Select(item => string.Format("{0} ({1})", item.info.displayName.translated.ToLower(), item.amount)).ToArray())) : string.Format("({0}) ", drop.inventory.itemList.Count);
 
                         if (drawText) player.SendConsoleCommand("ddraw.text", invokeTime + flickerDelay, __(airdropCC), drop.transform.position + new Vector3(0f, 0.5f, 0f), string.Format("{0} {1}<color={2}>{3}</color>", _(drop.ShortPrefabName), contents, distCC, currDistance));
                         if (drawBox) player.SendConsoleCommand("ddraw.box", invokeTime + flickerDelay, __(airdropCC), drop.transform.position + new Vector3(0f, 0.5f, 0f), GetScale(currDistance));
@@ -1032,40 +1378,40 @@ namespace Oxide.Plugins
                 }
 
                 entityType = EntityType.Containers;
-                foreach (var container in cache.Containers.Where(target => target != null && target.transform != null && !target.IsDestroyed))
+                
+                foreach (var container in cache.Containers)
                 {
-                    double currDistance = Math.Floor(Vector3.Distance(container.transform.position, source.transform.position));
+                    if (container == null || container.transform == null || container.IsDestroyed)
+                        continue;
+
+                    currDistance = Math.Floor(Vector3.Distance(container.transform.position, source.transform.position));
 
                     if (currDistance > maxDistance)
                         continue;
 
-                    bool isBox = container.ShortPrefabName.Contains("box") || container.ShortPrefabName.Equals("heli_crate");
-                    bool isLoot = container.ShortPrefabName.Contains("loot") || container.ShortPrefabName.Contains("crate_") || container.ShortPrefabName.Contains("trash") || container.ShortPrefabName.Contains("hackable") || container.ShortPrefabName.Contains("oil");
+                    isBox = IsBox(container.ShortPrefabName);
+                    isLoot = IsLoot(container.ShortPrefabName);
 
-                    if (isBox)
+                    if (container is StashContainer)
                     {
-                        if (!showBox || currDistance > boxDistance)
+                        if (!showStash || currDistance > stashDistance || !trackStash)
                             continue;
                     }
-
-                    if (isLoot)
+                    else if (isBox)
                     {
-                        if (!showLoot || currDistance > lootDistance)
+                        if (!showBox || currDistance > boxDistance || !trackBox)
                             continue;
                     }
-
-                    if (container.ShortPrefabName.Contains("stash"))
+                    else if (isLoot)
                     {
-                        if (!showStash || currDistance > stashDistance)
+                        if (!showLoot || currDistance > lootDistance || !trackLoot)
                             continue;
                     }
-                    else if (!isBox && !isLoot && currDistance > boxDistance)
-                        continue;
 
                     string colorHex = isBox ? boxCC : isLoot ? lootCC : stashCC;
                     string contents = string.Empty;
 
-                    if (storedData.OnlineBoxes.Contains(player.UserIDString) && container.name.Contains("box"))
+                    if (ins.storedData.OnlineBoxes.Contains(player.UserIDString) && container.OwnerID.IsSteamId() && (container.name.Contains("box") || container.name.Contains("coffin")))
                     {
                         var owner = BasePlayer.activePlayerList.Find(x => x.userID == container.OwnerID);
 
@@ -1077,31 +1423,34 @@ namespace Oxide.Plugins
 
                     if (container.inventory?.itemList?.Count > 0)
                     {
-                        if (isLoot && showLootContents || container.ShortPrefabName.Contains("stash") && showStashContents)
+                        if (isLoot && showLootContents || container is StashContainer && showStashContents)
                             contents = string.Format("({0}) ", string.Join(", ", container.inventory.itemList.Select(item => string.Format("{0} ({1})", item.info.displayName.translated.ToLower(), item.amount)).ToArray()));
                         else
-                            contents = string.Format("({0}) ", container.inventory.itemList.Count());
+                            contents = string.Format("({0}) ", container.inventory.itemList.Count);
                     }
 
                     if (string.IsNullOrEmpty(contents) && !drawEmptyContainers) continue;
-                    if (drawText) player.SendConsoleCommand("ddraw.text", invokeTime + flickerDelay, __(colorHex), container.transform.position + new Vector3(0f, 0.5f, 0f), string.Format("{0} {1}<color={2}>{3}</color>", _(container.ShortPrefabName), contents, distCC, currDistance));
+
+                    string shortname = _(container.ShortPrefabName).Replace("coffinstorage", "coffin");
+                    if (drawText) player.SendConsoleCommand("ddraw.text", invokeTime + flickerDelay, __(colorHex), container.transform.position + new Vector3(0f, 0.5f, 0f), string.Format("{0} {1}<color={2}>{3}</color>", shortname, contents, distCC, currDistance));
                     if (drawBox) player.SendConsoleCommand("ddraw.box", invokeTime + flickerDelay, __(colorHex), container.transform.position + new Vector3(0f, 0.5f, 0f), GetScale(currDistance));
                     if (objectsLimit > 0 && ++drawnObjects > objectsLimit) return false;
                 }
 
-                return LatencyAccepted(tick);
+                return LatencyAccepted();
             }
 
-            private bool ShowBags(DateTime tick)
+            private bool ShowBags()
             {
-                if (!showBags)
+                if (!showBags || !trackBags)
                     return true;
 
                 entityType = EntityType.Bags;
+                double currDistance;
 
                 foreach (var bag in cache.Bags)
                 {
-                    var currDistance = Math.Floor(Vector3.Distance(bag.Key, source.transform.position));
+                    currDistance = Math.Floor(Vector3.Distance(bag.Key, source.transform.position));
 
                     if (currDistance < bagDistance && currDistance < maxDistance)
                     {
@@ -1111,19 +1460,20 @@ namespace Oxide.Plugins
                     }
                 }
 
-                return LatencyAccepted(tick);
+                return LatencyAccepted();
             }
 
-            private bool ShowTurrets(DateTime tick)
+            private bool ShowTurrets()
             {
-                if (!showTurrets)
+                if (!showTurrets || !trackTurrets)
                     return true;
 
                 entityType = EntityType.Turrets;
+                double currDistance;
 
                 foreach (var turret in cache.Turrets)
                 {
-                    var currDistance = Math.Floor(Vector3.Distance(turret.Key, source.transform.position));
+                    currDistance = Math.Floor(Vector3.Distance(turret.Key, source.transform.position));
 
                     if (currDistance < turretDistance && currDistance < maxDistance)
                     {
@@ -1133,19 +1483,23 @@ namespace Oxide.Plugins
                     }
                 }
 
-                return LatencyAccepted(tick);
+                return LatencyAccepted();
             }
 
-            private bool ShowDead(DateTime tick)
+            private bool ShowDead()
             {
-                if (!showDead)
+                if (!showDead || !trackDead)
                     return true;
 
                 entityType = EntityType.Dead;
+                double currDistance;
 
-                foreach (var corpse in cache.Corpses.Where(kvp => kvp.Key != null && kvp.Key.transform != null))
+                foreach (var corpse in cache.Corpses)
                 {
-                    double currDistance = Math.Floor(Vector3.Distance(source.transform.position, corpse.Key.transform.position));
+                    if (corpse.Key == null || corpse.Key.transform == null || corpse.Key.IsDestroyed)
+                        continue;
+
+                    currDistance = Math.Floor(Vector3.Distance(corpse.Key.transform.position, source.transform.position));
 
                     if (currDistance < corpseDistance && currDistance < maxDistance)
                     {
@@ -1155,18 +1509,24 @@ namespace Oxide.Plugins
                     }
                 }
 
-                return LatencyAccepted(tick);
+                return LatencyAccepted();
             }
 
-            private bool ShowNPC(DateTime tick)
+            private bool ShowNPC()
             {
-                if (!showNPC)
+                if (!showNPC || !trackNPC)
                     return true;
 
                 entityType = EntityType.Zombies;
-                foreach (var zombie in cache.Zombies.Where(target => target != null && target.transform != null && !target.IsDestroyed))
+                double currDistance;
+                float j, k = TerrainMeta.HeightMap.GetHeight(source.transform.position);
+
+                foreach (var zombie in cache.Zombies)
                 {
-                    double currDistance = Math.Floor(Vector3.Distance(zombie.transform.position, source.transform.position));
+                    if (zombie == null || zombie.transform == null || zombie.IsDestroyed)
+                        continue;
+
+                    currDistance = Math.Floor(Vector3.Distance(zombie.transform.position, source.transform.position));
 
                     if (currDistance > maxDistance)
                         continue;
@@ -1182,19 +1542,20 @@ namespace Oxide.Plugins
                     if (objectsLimit > 0 && ++drawnObjects > objectsLimit) return false;
                 }
 
-                float k = TerrainMeta.HeightMap.GetHeight(source.transform.position);
-
                 entityType = EntityType.Npc;
-                foreach (var target in cache.NPCPlayers.Where(target => target != null && target.transform != null && !target.IsDestroyed))
+                foreach (var target in cache.NPCPlayers)
                 {
-                    double currDistance = Math.Floor(Vector3.Distance(target.transform.position, source.transform.position));
+                    if (target == null || target.transform == null || target.IsDestroyed)
+                        continue;
+
+                    currDistance = Math.Floor(Vector3.Distance(target.transform.position, source.transform.position));
 
                     if (player == target || currDistance > maxDistance)
                         continue;
 
                     if (skipUnderworld)
                     {
-                        float j = TerrainMeta.HeightMap.GetHeight(target.transform.position);
+                        j = TerrainMeta.HeightMap.GetHeight(target.transform.position);
                         
                         if (j > target.transform.position.y)
                         {
@@ -1228,9 +1589,12 @@ namespace Oxide.Plugins
                 }
 
                 entityType = EntityType.Animals;
-                foreach (var npc in cache.Animals.Where(target => target != null && target.transform != null && !target.IsDestroyed))
+                foreach (var npc in cache.Animals)
                 {
-                    double currDistance = Math.Floor(Vector3.Distance(npc.transform.position, source.transform.position));
+                    if (npc == null || npc.transform == null || npc.IsDestroyed)
+                        continue;
+
+                    currDistance = Math.Floor(Vector3.Distance(npc.transform.position, source.transform.position));
 
                     if (currDistance < npcDistance && currDistance < maxDistance)
                     {
@@ -1240,129 +1604,171 @@ namespace Oxide.Plugins
                     }
                 }
 
-                return LatencyAccepted(tick);
+                return LatencyAccepted();
             }
 
-            private bool ShowOre(DateTime tick)
+            private bool ShowOre()
             {
-                if (!showOre)
+                if (!showOre || !trackOre)
                     return true;
 
                 entityType = EntityType.Ore;
-
+                double currDistance;
+                
                 foreach (var ore in cache.Ores)
                 {
-                    double currDistance = Math.Floor(Vector3.Distance(source.transform.position, ore.Key));
+                    currDistance = Math.Floor(Vector3.Distance(ore.Key, source.transform.position));
 
                     if (currDistance < oreDistance && currDistance < maxDistance)
                     {
-                        object value = showResourceAmounts ? string.Format("({0})", ore.Value.Info) : string.Format("<color={0}>{1}</color>", distCC, currDistance);
-                        if (drawText) player.SendConsoleCommand("ddraw.text", invokeTime + flickerDelay, __(resourceCC), ore.Key + new Vector3(0f, 1f, 0f), string.Format("{0} {1}", ore.Value.Name, value));
+                        string info = showResourceAmounts ? string.Format("({0})", ore.Value.Info) : string.Format("<color={0}>{1}</color>", distCC, currDistance);
+                        if (drawText) player.SendConsoleCommand("ddraw.text", invokeTime + flickerDelay, __(resourceCC), ore.Key + new Vector3(0f, 1f, 0f), string.Format("{0} {1}", ore.Value.Name, info));
                         if (drawBox) player.SendConsoleCommand("ddraw.box", invokeTime + flickerDelay, __(resourceCC), ore.Key + new Vector3(0f, 1f, 0f), GetScale(currDistance));
                         if (objectsLimit > 0 && ++drawnObjects > objectsLimit) return false;
                     }
                 }
 
-                return LatencyAccepted(tick);
+                return LatencyAccepted();
             }
 
-            private bool ShowCollectables(DateTime tick)
+            private bool ShowCollectables()
             {
-                if (!showCollectible)
+                if (!showCollectible || !trackCollectibles)
                     return true;
 
                 entityType = EntityType.Collectibles;
-
+                double currDistance;
+                
                 foreach (var col in cache.Collectibles)
                 {
-                    var currDistance = Math.Floor(Vector3.Distance(col.Key, source.transform.position));
+                    currDistance = Math.Floor(Vector3.Distance(col.Key, source.transform.position));
 
                     if (currDistance < colDistance && currDistance < maxDistance)
                     {
-                        object value = showResourceAmounts ? string.Format("({0})", col.Value.Info) : string.Format("<color={0}>{1}</color>", distCC, currDistance);
-                        if (drawText) player.SendConsoleCommand("ddraw.text", invokeTime + flickerDelay, __(colCC), col.Key + new Vector3(0f, 1f, 0f), string.Format("{0} {1}", _(col.Value.Name), value));
+                        string info = showResourceAmounts ? string.Format("({0})", col.Value.Info) : string.Format("<color={0}>{1}</color>", distCC, currDistance);
+                        if (drawText) player.SendConsoleCommand("ddraw.text", invokeTime + flickerDelay, __(colCC), col.Key + new Vector3(0f, 1f, 0f), string.Format("{0} {1}", _(col.Value.Name), info));
                         if (drawBox) player.SendConsoleCommand("ddraw.box", invokeTime + flickerDelay, __(colCC), col.Key + new Vector3(0f, 1f, 0f), col.Value.Size);
                         if (objectsLimit > 0 && ++drawnObjects > objectsLimit) return false;
                     }
                 }
 
-                return LatencyAccepted(tick);
+                return LatencyAccepted();
             }
 
-            private bool ShowEntity(DateTime tick, EntityType entityType, bool trackType)
+            private bool ShowEntity(EntityType entityType, bool track, string entityName, List<BaseEntity> entities)
             {
-                if (!trackType)
+                if (!track)
                     return true;
 
                 this.entityType = entityType;
-                string entityName = string.Empty;
-                var entities = GetEntities(ref entityName);
 
                 if (entities.Count > 0)
                 {
-                    foreach (var e in entities.Where(target => target != null && target.transform != null && !target.IsDestroyed))
+                    double currDistance;
+                    string info;
+
+                    foreach (var e in entities)
                     {
-                        double currDistance = Math.Floor(Vector3.Distance(e.transform.position, source.transform.position));
-                        if ((entityType == EntityType.Boats || entityType == EntityType.RigidHullInflatableBoats) && currDistance > boatDistance) continue;
-                        if (entityType == EntityType.Cars && currDistance > carDistance) continue;
-                        if (entityType == EntityType.MiniCopter && currDistance > mcDistance) continue;
-                        string info = e.Health() <= 0 ? entityName : string.Format("{0} <color={1}>{2}</color>", entityName, healthCC, e.Health() > 1000 ? Math.Floor(e.Health()).ToString("#,##0,K", CultureInfo.InvariantCulture) : Math.Floor(e.Health()).ToString("#0"));
+                        if (e == null || e.transform == null || e.IsDestroyed)
+                            continue;
+
+                        currDistance = Math.Floor(Vector3.Distance(e.transform.position, source.transform.position));
+
+                        if (entityType == EntityType.Boats || entityType == EntityType.RigidHullInflatableBoats)
+                        {
+                            if (currDistance > boatDistance) continue;
+                            if (!trackRigidHullInflatableBoats && !uiBtnRHIB) continue;
+                        }
+                        else if (entityType == EntityType.Cars)
+                        {
+                            if (currDistance > carDistance) continue;
+                            if (!trackCars && !uiBtnCars) continue;
+                        }
+                        else if (entityType == EntityType.MiniCopter)
+                        {
+                            if (currDistance > mcDistance) continue;
+                            if (!trackMiniCopter && !uiBtnMiniCopter) continue;
+                        }
+                        else if (entityType == EntityType.RidableHorses)
+                        {
+                            if (currDistance > rhDistance) continue;
+                            if (!trackRidableHorses && !uiBtnRidableHorses) continue;
+                        }
+                        else if (entityType == EntityType.CH47Helicopters && !trackCH47 && !uiBtnCH47) continue;
+
+                        info = e.Health() <= 0 ? entityName : string.Format("{0} <color={1}>{2}</color>", entityName, healthCC, e.Health() > 1000 ? Math.Floor(e.Health()).ToString("#,##0,K", CultureInfo.InvariantCulture) : Math.Floor(e.Health()).ToString("#0"));
+
                         if (drawText) player.SendConsoleCommand("ddraw.text", invokeTime + flickerDelay, __(bradleyCC), e.transform.position + new Vector3(0f, 2f, 0f), string.Format("{0} <color={1}>{2}</color>", info, distCC, currDistance));
                         if (drawBox) player.SendConsoleCommand("ddraw.box", invokeTime + flickerDelay, __(bradleyCC), e.transform.position + new Vector3(0f, 1f, 0f), GetScale(currDistance));
                         if (objectsLimit > 0 && ++drawnObjects > objectsLimit) return false;
                     }
-
-                    entities.Clear();
                 }
-
-                return LatencyAccepted(tick);
+                
+                return LatencyAccepted();
             }
 
-            private List<BaseEntity> GetEntities(ref string entityName)
+            public static string GetContents(ItemContainer[] containers)
             {
-                var entities = new List<BaseEntity>();
-
-                switch (entityType)
+                if (containers == null)
                 {
-                    case EntityType.CargoShips:
-                        {
-                            entities = cache.Entities.Where(e => e is CargoShip).ToList();
-                            entityName = "CS";
-                        }
-                        break;
-                    case EntityType.Cars:
-                        {
-                            entities = cache.Entities.Where(e => e is BaseCar).ToList();
-                            entityName = "C";
-                        }
-                        break;
-                    case EntityType.CH47Helicopters:
-                        {
-                            entities = cache.Entities.Where(e => e is CH47Helicopter).ToList();
-                            entityName = "CH47";
-                        }
-                        break;
-                    case EntityType.RigidHullInflatableBoats:
-                        {
-                            entities = cache.Entities.Where(e => e is RHIB).ToList();
-                            entityName = "RHIB";
-                        }
-                        break;
-                    case EntityType.Boats:
-                        {
-                            entities = cache.Entities.Where(e => e is BaseBoat && !(e is RHIB)).ToList();
-                            entityName = "RB";
-                        }
-                        break;
-                    case EntityType.MiniCopter:
-                        {
-                            entities = cache.Entities.Where(e => e is MiniCopter).ToList();
-                            entityName = "MC";
-                        }
-                        break;
+                    return string.Empty;
                 }
 
-                return entities;
+                var list = new List<string>();
+                int count = 0;
+                int amount = 0;
+
+                foreach (var container in containers)
+                {
+                    if (container == null || container.itemList == null) continue;
+
+                    count += container.itemList.Count;
+
+                    foreach(var item in container.itemList)
+                    {
+                        list.Add(string.Format("{0} ({1})", item.info.displayName.translated.ToLower(), item.amount));
+
+                        if (++amount >= corpseContentAmount)
+                        {
+                            break;
+                        }
+                    }
+                }
+
+                if (corpseContentAmount > 0 && list.Count > 0)
+                {
+                    return string.Format("{0} ({1})", string.Join(", ", list.ToArray()), count.ToString());
+                }
+
+                return count.ToString();
+            }
+
+            public static string GetContents(DroppedItemContainer backpack)
+            {
+                if (backpack?.inventory?.itemList == null)
+                {
+                    return string.Empty;
+                }
+
+                if (backpackContentAmount > 0 && backpack.inventory.itemList.Count > 0)
+                {
+                    var list = new List<string>();
+                    int amount = 0;
+
+                    foreach (var item in backpack.inventory.itemList)
+                    {
+                        list.Add(string.Format("{0} ({1})", item.info.displayName.translated.ToLower(), item.amount));
+
+                        if (++amount >= backpackContentAmount)
+                        {
+                            break;
+                        }
+                    }
+
+                    return string.Format("({0}) ({1}) ", string.Join(", ", list.ToArray()), backpack.inventory.itemList.Count.ToString());
+                }
+
+                return backpack.inventory.itemList.Count.ToString();
             }
 
             private static double GetScale(double value)
@@ -1370,31 +1776,7 @@ namespace Oxide.Plugins
                 return value * 0.02;
             }
         }
-
-        private const string permName = "adminradar.allowed";
-        private const string permBypass = "adminradar.bypass";
-        private const string permAuto = "adminradar.auto";
-        private const string genericPrefab = "assets/prefabs/tools/map/genericradiusmarker.prefab";
-        private const string vendingPrefab = "assets/prefabs/deployable/vendingmachine/vending_mapmarker.prefab";
-        private const float flickerDelay = 0.05f;
-        private static AdminRadar ins;
-        private static StoredData storedData = new StoredData();
-        private static bool init; // don't use cache while false
-
-        private static readonly List<string> tags = new List<string>
-            {"ore", "cluster", "1", "2", "3", "4", "5", "6", "_", ".", "-", "deployed", "wooden", "large", "pile", "prefab", "collectable", "loot", "small"}; // strip these from names to reduce the size of the text and make it more readable
-
-        private readonly Dictionary<ulong, Color> playersColor = new Dictionary<ulong, Color>();
-        private readonly List<BasePlayer> accessList = new List<BasePlayer>();
         
-        private static readonly Dictionary<ulong, SortedDictionary<float, Vector3>> trackers = new Dictionary<ulong, SortedDictionary<float, Vector3>>(); // player id, timestamp and player's position
-        private static readonly Dictionary<ulong, Timer> voices = new Dictionary<ulong, Timer>();
-        private static readonly Dictionary<ulong, Timer> trackerTimers = new Dictionary<ulong, Timer>();
-        private static readonly Dictionary<string, Marker> markers = new Dictionary<string, Marker>();
-        private static readonly List<Radar> activeRadars = new List<Radar>();
-        private static Cache cache = new Cache();
-        [PluginReference] private Plugin Vanish;
-
         private bool IsRadar(string id)
         {
             return activeRadars.Any(x => x.player.UserIDString == id);
@@ -1419,9 +1801,10 @@ namespace Oxide.Plugins
         private void Loaded()
         {
             cache = new Cache();
-            permission.RegisterPermission(permName, this);
+            permission.RegisterPermission(permAllowed, this);
             permission.RegisterPermission(permBypass, this);
             permission.RegisterPermission(permAuto, this);
+            permission.RegisterPermission(permBypassOverride, this);
         }
 
         private void OnServerInitialized()
@@ -1464,11 +1847,11 @@ namespace Oxide.Plugins
             }
 
             Subscribe(nameof(OnPlayerInit));
-            Subscribe(nameof(OnPlayerDisconnected));
 
             if (usePlayerMarkers || useSleeperMarkers || usePrivilegeMarkers)
             {
                 Subscribe(nameof(CanNetworkTo));
+                Subscribe(nameof(OnPlayerDisconnected));
             }
 
             if (usePlayerTracker || usePlayerMarkers)
@@ -1505,26 +1888,16 @@ namespace Oxide.Plugins
                 Subscribe(nameof(OnCupboardDeauthorize));
             }
 
-            var tick = DateTime.Now;
-            int cached = 0, total = 0;
-
-            foreach (var e in BaseNetworkable.serverEntities.OfType<BaseEntity>())
-            {
-                if (AddToCache(e))
-                    cached++;
-
-                total++;
-            }
-
-            Puts("Took {0}ms to cache {1}/{2} entities", (DateTime.Now - tick).TotalMilliseconds, cached, total);
-            StartCreateMapMarkersCoroutine();
             Subscribe(nameof(OnEntityDeath));
             Subscribe(nameof(OnEntityKill));
             Subscribe(nameof(OnEntitySpawned));
 
+            ServerMgr.Instance.StartCoroutine(FillCache());
+            StartCreateMapMarkersCoroutine();
+
             foreach (var player in BasePlayer.activePlayerList)
             {
-                if (player != null && player.IsConnected && player.GetComponent<Radar>() == null && permission.UserHasPermission(player.UserIDString, permName))
+                if (player != null && player.IsConnected && player.GetComponent<Radar>() == null && permission.UserHasPermission(player.UserIDString, permAllowed))
                 {
                     cmdESP(player, "radar", new string[0]);
                 }
@@ -1562,7 +1935,16 @@ namespace Oxide.Plugins
                 return null;
             }
 
-            var marker = Marker.GetMarker(entity as BaseEntity);
+            Marker marker = null;
+
+            foreach (var m in markers.Values)
+            {
+                if (m.vending == entity || m.personal == entity || m.generic == entity)
+                {
+                    marker = m;
+                    break;
+                }
+            }
 
             if (marker == null)
             {
@@ -1574,36 +1956,50 @@ namespace Oxide.Plugins
                 return target.IsAdmin || DeveloperList.Contains(target.userID);
             }
 
-            if (hideSelfMarker && markers.Values.Any(m => m.entity == target && (m.generic == entity || m.vending == entity)))
+            if (hideSelfMarker)
             {
-                return false;
+                foreach (var m in markers.Values)
+                {
+                    if (m.player == null || m.player != target)
+                    {
+                        continue;
+                    }
+
+                    if (entity == m.generic || entity == m.vending)
+                    {
+                        return false;
+                    }
+                }
             }
 
-            if (markers.Values.Any(m => m.IsPrivilegeMarker && (entity == m.personal || entity == m.generic || entity == m.vending)))
+            foreach(var m in markers.Values)
             {
-                var pm = markers.Values.First(m => m.IsPrivilegeMarker && (entity == m.personal || entity == m.generic || entity == m.vending));
-
-                if (entity == pm.personal) // if usePersonalMarkers then show if the target is authed
+                if (m.IsPrivilegeMarker && m.privilege != null && (entity == m.personal || entity == m.generic || entity == m.vending))
                 {
-                    return pm.privilege.IsAuthed(target);
-                }
-
-                if (entity == pm.generic && usePersonalMarkers && pm.privilege.IsAuthed(target)) // only show generic markers to authed players and admins
-                {
-                    return true;
-                }
-
-                if (entity == pm.vending) // this marker contains all authed users
-                {
-                    if (target.net?.connection?.authLevel == 0)
+                    if (entity == m.personal) // if usePersonalMarkers then show if the target is authed
                     {
-                        return false; // do not show who is authed to players
+                        return m.privilege.IsAuthed(target);
                     }
 
-                    if (pm.personal != null && pm.privilege.IsAuthed(target))
+                    if (entity == m.generic && usePersonalMarkers && m.privilege.IsAuthed(target)) // only show generic markers to authed players and admins
                     {
-                        return false; // if usePersonalMarkers then don't show if this is a cupboard they're authed on
+                        return true;
                     }
+
+                    if (entity == m.vending) // this marker contains all authed users
+                    {
+                        if (target.net?.connection?.authLevel == 0)
+                        {
+                            return false; // do not show who is authed to players
+                        }
+
+                        if (m.personal != null && m.privilege.IsAuthed(target))
+                        {
+                            return false; // if usePersonalMarkers then don't show if this is a cupboard they're authed on
+                        }
+                    }
+
+                    break;
                 }
             }
 
@@ -1640,9 +2036,6 @@ namespace Oxide.Plugins
 
         private void OnPlayerSleepEnded(BasePlayer player)
         {
-            if (!trackAdmins && (player.IsAdmin || DeveloperList.Contains(player.userID)))
-                return;
-
             Track(player);
         }
 
@@ -1711,6 +2104,11 @@ namespace Oxide.Plugins
                 }
             }
 
+            foreach(var marker in markers.Values.ToList())
+            {
+                marker.DestroyIt();
+            }
+
             var markerObjects = UnityEngine.Object.FindObjectsOfType(typeof(Marker));
 
             if (markerObjects != null)
@@ -1729,13 +2127,19 @@ namespace Oxide.Plugins
                 }
             }
 
-            markers.Clear();
-            trackerTimers.Clear();
             playersColor.Clear();
+            tags.Clear();
             trackers.Clear();
             voices.Clear();
-            tags.Clear();
+            trackerTimers.Clear();
+            markers.Clear();
+            activeRadars.Clear();
             cache = null;
+            uiBtnNames = new string[0];
+            uiButtons = null;
+            authorized.Clear();
+            itemExceptions.Clear();
+            groupColors.Clear();
         }
 
         private void OnEntityDeath(BaseCombatEntity entity, HitInfo info)
@@ -1807,38 +2211,64 @@ namespace Oxide.Plugins
         private static void DrawVision(BasePlayer player, BasePlayer target, float invokeTime)
         {
             RaycastHit hit;
-            if (!Physics.Raycast(target.eyes.HeadRay(), out hit, Mathf.Infinity))
-                return;
+            if (Physics.Raycast(target.eyes.HeadRay(), out hit, Mathf.Infinity))
+            {
+                player.SendConsoleCommand("ddraw.arrow", invokeTime + flickerDelay, Color.red, target.eyes.position + new Vector3(0f, 0.115f, 0f), hit.point, 0.15f);
+            }
+        }
 
-            player.SendConsoleCommand("ddraw.arrow", invokeTime + flickerDelay, Color.red, target.eyes.position + new Vector3(0f, 0.115f, 0f), hit.point, 0.15f);
+        private static bool IsHex(string value)
+        {
+            foreach (char c in value)
+            {
+                if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')))
+                {
+                    return false;
+                }
+            }
+
+            return true;
         }
 
         private static Color __(string value)
         {
-            if (value.All(c => c >= '0' && c <= '9' || c >= 'a' && c <= 'f' || c >= 'A' && c <= 'F'))
+            if (IsHex(value))
             {
                 value = "#" + value;
             }
 
             Color color;
             if (!ColorUtility.TryParseHtmlString(value, out color))
+            {
                 color = Color.white;
+            }
 
             return color;
         }
 
         private static string _(string value)
         {
-            foreach (string str in tags)
-                value = value.Replace(str, string.Empty);
+            var sb = new StringBuilder(value);
 
-            return value;
+            foreach (string str in tags)
+            {
+                sb.Replace(str, string.Empty);
+            }
+
+            return sb.ToString();
         }
 
         private void Track(BasePlayer player)
         {
+            if (!trackAdmins && (player.IsAdmin || DeveloperList.Contains(player.userID)))
+            {
+                return;
+            }
+
             if (!player.gameObject.GetComponent<PlayerTracker>())
+            {
                 player.gameObject.AddComponent<PlayerTracker>();
+            }
 
             if (trackerTimers.ContainsKey(player.userID))
             {
@@ -1847,35 +2277,30 @@ namespace Oxide.Plugins
             }
         }
 
-        private static void RemoveFromCache(BaseEntity entity)
+        private System.Collections.IEnumerator FillCache()
         {
-            if (entity == null || cache.Entities.Remove(entity))
+            var tick = DateTime.Now;
+            int cached = 0, total = 0;
+
+            foreach (var e in BaseNetworkable.serverEntities)
             {
-                return;
+                if (e != null && !e.IsDestroyed && e is BaseEntity)
+                {
+                    if (AddToCache(e as BaseEntity))
+                    {
+                        cached++;
+                    }
+
+                    total++;
+                }
+
+                if (total % 50 == 0)
+                {
+                    yield return new WaitForEndOfFrame();
+                }
             }
 
-            var position = entity.transform?.position ?? Vector3.zero;
-
-            if (cache.Ores.ContainsKey(position))
-                cache.Ores.Remove(position);
-            else if (entity is StorageContainer)
-                cache.Containers.Remove(entity as StorageContainer);
-            else if (cache.Collectibles.ContainsKey(position))
-                cache.Collectibles.Remove(position);
-            else if (entity is BaseNpc)
-                cache.Animals.Remove(entity as BaseNpc);
-            else if (entity is PlayerCorpse)
-                cache.Corpses.Remove(entity as PlayerCorpse);
-            else if (cache.Bags.ContainsKey(position))
-                cache.Bags.Remove(position);
-            else if (entity is DroppedItemContainer)
-                cache.Backpacks.Remove(entity as DroppedItemContainer);
-            else if (entity is BaseHelicopter)
-                cache.Helicopters.Remove(entity as BaseHelicopter);
-            else if (cache.Turrets.ContainsKey(position))
-                cache.Turrets.Remove(position);
-            else if (entity is Zombie)
-                cache.Zombies.Remove(entity as Zombie);
+            Puts("Cached {0}/{1} entities in {2} seconds!", cached, total, (DateTime.Now - tick).TotalSeconds);
         }
 
         private readonly List<BaseEntity> coList = new List<BaseEntity>();
@@ -1908,7 +2333,7 @@ namespace Oxide.Plugins
             coList.Clear();
             ServerMgr.Instance.StopCoroutine(CreateMapMarkers());
             watch.Stop();
-            Puts("Finished creating map markers in {0} seconds!", watch.Elapsed.TotalSeconds);
+            Puts("Finished creating {0} map markers in {1} seconds!", markers.Count, watch.Elapsed.TotalSeconds);
             CoListManager();
         }
 
@@ -1959,7 +2384,7 @@ namespace Oxide.Plugins
 
             if (entity is BuildingPrivlidge)
             {
-                if (BasePlayer.activePlayerList.Any()) // TODO: implement better solution for this check
+                if (BasePlayer.activePlayerList.Count > 0)
                 {
                     SetupPrivilegeMarker(entity as BuildingPrivlidge, CupboardAction.Authorize, null);
                     coList.Remove(entity);
@@ -1968,7 +2393,7 @@ namespace Oxide.Plugins
                 return;
             }
 
-            if (!accessList.Any())
+            if (accessList.Count == 0)
             {
                 foreach(var marker in markers.Values.ToList())
                 {
@@ -1992,7 +2417,7 @@ namespace Oxide.Plugins
 
             var position = entity.transform.position;
 
-            if (entity.IsNpc)
+            if (trackNPC && entity.IsNpc)
             {
                 if (!coList.Contains(entity) && ((useHumanoidTracker && !(entity is BaseNpc)) || (useAnimalTracker && entity is BaseNpc)))
                 {
@@ -2033,7 +2458,7 @@ namespace Oxide.Plugins
                 return false;
             }
 
-            if (entity is BuildingPrivlidge)
+            if (trackTC && entity is BuildingPrivlidge)
             {
                 var priv = entity as BuildingPrivlidge;
 
@@ -2052,7 +2477,7 @@ namespace Oxide.Plugins
             }
             else if (entity is StorageContainer)
             {
-                if (entity is SupplyDrop)
+                if (trackSupplyDrops && entity is SupplyDrop)
                 {
                     var supplyDrop = entity as SupplyDrop;
 
@@ -2067,15 +2492,25 @@ namespace Oxide.Plugins
 
                 var container = entity as StorageContainer;
 
-                if (entity.name.Contains("turret"))
+                if (trackTurrets && entity.name.Contains("turret"))
                 {
                     if (!cache.Turrets.ContainsKey(position))
                     {
-                        cache.Turrets.Add(position, new CachedInfo { Size = 1f, Info = container.inventory?.itemList?.Select(item => item.amount).Sum() ?? 0 });
+                        int amount = 0;
+
+                        if (container.inventory?.itemList?.Count > 0)
+                        {
+                            foreach(Item item in container.inventory.itemList)
+                            {
+                                amount += item.amount;
+                            }
+                        }
+
+                        cache.Turrets.Add(position, new CachedInfo { Size = 1f, Info = amount });
                         return true;
                     }
                 }
-                else if (entity.name.Contains("box") || entity.ShortPrefabName.Equals("heli_crate") || entity.name.Contains("loot") || entity.name.Contains("crate_") || entity.name.Contains("stash") || entity.name.Contains("oil") || entity.name.Contains("hackable"))
+                else if (IsBox(entity.ShortPrefabName) || IsLoot(entity.ShortPrefabName))
                 {
                     if (!cache.Containers.Contains(container))
                     {
@@ -2086,7 +2521,7 @@ namespace Oxide.Plugins
 
                 return false;
             }
-            else if (entity is DroppedItemContainer) //entity.ShortPrefabName.Equals("item_drop_backpack"))
+            else if (trackLoot && entity is DroppedItemContainer)
             {
                 var backpack = entity as DroppedItemContainer;
 
@@ -2098,7 +2533,7 @@ namespace Oxide.Plugins
 
                 return false;
             }
-            else if (entity is CollectibleEntity)
+            else if (trackCollectibles && entity is CollectibleEntity)
             {
                 if (!cache.Collectibles.ContainsKey(position))
                 {
@@ -2108,31 +2543,31 @@ namespace Oxide.Plugins
 
                 return false;
             }
-            else if (entity is OreResourceEntity)
+            else if (trackOre && entity is OreResourceEntity)
             {
                 if (!cache.Ores.ContainsKey(position))
                 {
-                    float amount = entity.GetComponentInParent<ResourceDispenser>().containedItems.Select(item => item.amount).Sum();
+                    float amount = entity.GetComponentInParent<ResourceDispenser>().containedItems.Sum(item => item.amount);
                     cache.Ores.Add(position, new CachedInfo { Name = _(entity.ShortPrefabName), Info = amount });
                     return true;
                 }
 
                 return false;
             }
-            else if (entity is PlayerCorpse)
+            else if (trackDead && entity is PlayerCorpse)
             {
                 var corpse = entity as PlayerCorpse;
 
                 if (!cache.Corpses.ContainsKey(corpse) && corpse.playerSteamID.IsSteamId())
                 {
-                    int amount = corpse.containers?.Sum(x => x.itemList.Count) ?? 0;
-                    cache.Corpses.Add(corpse, new CachedInfo { Name = corpse.parentEnt?.ToString() ?? corpse.playerSteamID.ToString(), Info = amount });
+                    string contents = Radar.GetContents(corpse.containers);
+                    cache.Corpses.Add(corpse, new CachedInfo { Name = corpse.parentEnt?.ToString() ?? corpse.playerSteamID.ToString(), Info = contents });
                     return true;
                 }
 
                 return false;
             }
-            else if (entity is SleepingBag)
+            else if (trackBags && entity is SleepingBag)
             {
                 if (!cache.Bags.ContainsKey(position))
                 {
@@ -2166,11 +2601,21 @@ namespace Oxide.Plugins
 
                 return false;
             }
+            else if (trackRidableHorses && entity is RidableHorse)
+            {
+                if (!cache.RidableHorse.Contains(entity))
+                {
+                    cache.RidableHorse.Add(entity);
+                    return true;
+                }
+
+                return false;
+            }
             else if (trackRigidHullInflatableBoats && entity is RHIB)
             {
-                if (!cache.Entities.Contains(entity))
+                if (!cache.RHIB.Contains(entity))
                 {
-                    cache.Entities.Add(entity);
+                    cache.RHIB.Add(entity);
                     return true;
                 }
 
@@ -2178,9 +2623,9 @@ namespace Oxide.Plugins
             }
             else if (trackMiniCopter && entity is MiniCopter)
             {
-                if (!cache.Entities.Contains(entity))
+                if (!cache.MiniCopter.Contains(entity))
                 {
-                    cache.Entities.Add(entity);
+                    cache.MiniCopter.Add(entity);
                     return true;
                 }
 
@@ -2188,9 +2633,9 @@ namespace Oxide.Plugins
             }
             else if (trackBoats && entity is BaseBoat)
             {
-                if (!cache.Entities.Contains(entity))
+                if (!cache.Boats.Contains(entity))
                 {
-                    cache.Entities.Add(entity);
+                    cache.Boats.Add(entity);
                     return true;
                 }
 
@@ -2198,9 +2643,9 @@ namespace Oxide.Plugins
             }
             else if (trackCH47 && entity is CH47Helicopter)
             {
-                if (!cache.Entities.Contains(entity))
+                if (!cache.CH47.Contains(entity))
                 {
-                    cache.Entities.Add(entity);
+                    cache.CH47.Add(entity);
                     return true;
                 }
 
@@ -2208,9 +2653,9 @@ namespace Oxide.Plugins
             }
             if (trackCargoShips && entity is CargoShip)
             {
-                if (!cache.Entities.Contains(entity))
+                if (!cache.CargoShips.Contains(entity))
                 {
-                    cache.Entities.Add(entity);
+                    cache.CargoShips.Add(entity);
                     return true;
                 }
 
@@ -2218,15 +2663,100 @@ namespace Oxide.Plugins
             }
             else if (trackCars && entity is BaseCar)
             {
-                if (!cache.Entities.Contains(entity))
+                if (!cache.Cars.Contains(entity))
                 {
-                    cache.Entities.Add(entity);
+                    cache.Cars.Add(entity);
                     return true;
                 }
 
                 return false;
             }
-                                    
+
+            return false;
+        }
+
+        private static bool IsBox(string str)
+        {
+            if (trackBox)
+            {
+                return str.Contains("box") || str.Equals("heli_crate") || str.Contains("coffin") || str.Contains("stash");
+            }
+
+            return false;
+        }
+
+        private static bool IsLoot(string str)
+        {
+            if (trackLoot)
+            {
+                return str.Contains("loot") || str.Contains("crate_") || str.Contains("trash") || str.Contains("hackable") || str.Contains("oil");
+            }
+
+            return false;
+        }
+
+        private static void RemoveFromCache(BaseEntity entity)
+        {
+            if (entity == null)
+            {
+                return;
+            }
+
+            var position = entity.transform?.position ?? Vector3.zero;
+
+            if (cache.Ores.ContainsKey(position))
+                cache.Ores.Remove(position);
+            else if (entity is StorageContainer)
+                cache.Containers.Remove(entity as StorageContainer);
+            else if (cache.Collectibles.ContainsKey(position))
+                cache.Collectibles.Remove(position);
+            else if (entity is BaseNpc)
+                cache.Animals.Remove(entity as BaseNpc);
+            else if (entity is PlayerCorpse)
+                cache.Corpses.Remove(entity as PlayerCorpse);
+            else if (cache.Bags.ContainsKey(position))
+                cache.Bags.Remove(position);
+            else if (entity is DroppedItemContainer)
+                cache.Backpacks.Remove(entity as DroppedItemContainer);
+            else if (entity is BaseHelicopter)
+                cache.Helicopters.Remove(entity as BaseHelicopter);
+            else if (cache.Turrets.ContainsKey(position))
+                cache.Turrets.Remove(position);
+            else if (entity is Zombie)
+                cache.Zombies.Remove(entity as Zombie);
+            else if (entity is CargoShip)
+                cache.CargoShips.Remove(entity);
+            else if (entity is BaseCar)
+                cache.Cars.Remove(entity);
+            else if (entity is CH47Helicopter)
+                cache.CH47.Remove(entity);
+            else if (entity is RHIB)
+                cache.RHIB.Remove(entity);
+            else if (entity is BaseBoat)
+                cache.Boats.Remove(entity);
+            else if (entity is RidableHorse)
+                cache.RidableHorse.Remove(entity);
+            else if (entity is MiniCopter)
+                cache.MiniCopter.Remove(entity);
+        }
+
+        private bool HasAccess(BasePlayer player)
+        {
+            if (player == null)
+                return false;
+
+            if (DeveloperList.Contains(player.userID))
+                return true;
+
+            if (authorized.Count > 0)
+                return authorized.Contains(player.UserIDString);
+
+            if (permission.UserHasPermission(player.UserIDString, permAllowed))
+                return true;
+
+            if (player.IsConnected && player.net.connection.authLevel >= authLevel)
+                return true;
+
             return false;
         }
 
@@ -2244,29 +2774,6 @@ namespace Oxide.Plugins
             cmdESP(player, "espgui", arg.Args);
         }
         
-        private bool HasAccess(BasePlayer player)
-        {
-            if (player == null)
-                return false;
-
-            if (permission.UserHasPermission(player.UserIDString, permName))
-                return true;
-
-            if (DeveloperList.Contains(player.userID))
-                return true;
-
-            if (authorized.Count > 0)
-                return authorized.Contains(player.UserIDString);
-
-            if (player.IsConnected && player.net.connection.authLevel >= authLevel)
-                return true;
-
-            if (permission.UserHasPermission(player.UserIDString, "fauxadmin.allowed") && permission.UserHasPermission(player.UserIDString, permName) && player.IsDeveloper)
-                return true;
-
-            return false;
-        }
-
         private void cmdESP(BasePlayer player, string command, string[] args)
         {
             if (!HasAccess(player))
@@ -2282,18 +2789,22 @@ namespace Oxide.Plugins
                     case "drops":
                         {
                             bool hasDrops = false;
+                            DroppedItem drop = null;
 
-                            foreach (var entity in BaseNetworkable.serverEntities.Where(e => e is DroppedItem || e is Landmine || e is BearTrap || e is DroppedItemContainer))
+                            foreach (var entity in BaseNetworkable.serverEntities)
                             {
-                                var drop = entity as DroppedItem;
-                                string shortname = drop?.item?.info.shortname ?? entity.ShortPrefabName;
-                                double currDistance = Math.Floor(Vector3.Distance(entity.transform.position, player.transform.position));
-
-                                if (currDistance < lootDistance)
+                                if (entity is DroppedItem || entity is Landmine || entity is BearTrap || entity is DroppedItemContainer)
                                 {
-                                    if (drawText) player.SendConsoleCommand("ddraw.text", 30f, Color.red, entity.transform.position, string.Format("{0} <color=#FFFF00>{1}</color>", shortname, currDistance));
-                                    if (drawBox) player.SendConsoleCommand("ddraw.box", 30f, Color.red, entity.transform.position, 0.25f);
-                                    hasDrops = true;
+                                    drop = entity as DroppedItem;
+                                    string shortname = drop?.item?.info.shortname ?? entity.ShortPrefabName;
+                                    double currDistance = Math.Floor(Vector3.Distance(entity.transform.position, player.transform.position));
+
+                                    if (currDistance < lootDistance)
+                                    {
+                                        if (drawText) player.SendConsoleCommand("ddraw.text", 30f, Color.red, entity.transform.position, string.Format("{0} <color=#FFFF00>{1}</color>", shortname, currDistance));
+                                        if (drawBox) player.SendConsoleCommand("ddraw.box", 30f, Color.red, entity.transform.position, 0.25f);
+                                        hasDrops = true;
+                                    }
                                 }
                             }
 
@@ -2406,7 +2917,7 @@ namespace Oxide.Plugins
 
                             if (lastPos != Vector3.zero)
                             {
-                                string name = covalence.Players.FindPlayerById(kvp.Key.ToString()).Name;
+                                string name = covalence.Players.FindPlayerById(kvp.Key.ToString())?.Name ?? kvp.Key.ToString();
                                 player.SendConsoleCommand("ddraw.text", trackDrawTime, color, lastPos, string.Format("{0} ({1})", name, trackers[kvp.Key].Count));
                             }
                         }
@@ -2420,7 +2931,7 @@ namespace Oxide.Plugins
 
                 if (args[0] == "help")
                 {
-                    player.ChatMessage(msg("Help1", player.UserIDString, "all, bag, box, col, dead, loot, npc, ore, stash, tc, turret, ht"));
+                    player.ChatMessage(msg("Help1", player.UserIDString, string.Join(", ", GetButtonNames, "HT")));
                     player.ChatMessage(msg("Help2", player.UserIDString, szChatCommand, "online"));
                     player.ChatMessage(msg("Help3", player.UserIDString, szChatCommand, "ui"));
                     player.ChatMessage(msg("Help4", player.UserIDString, szChatCommand, "tracker"));
@@ -2462,7 +2973,7 @@ namespace Oxide.Plugins
 
             if (command == "espgui")
             {
-                string filter = storedData.Filters[player.UserIDString].Find(f => f.Contains(args[0]) || args[0].Contains(f)) ?? args[0];
+                string filter = storedData.Filters[player.UserIDString].Find(f => f.Equals(args[0])) ?? storedData.Filters[player.UserIDString].Find(f => f.Contains(args[0]) || args[0].Contains(f)) ?? args[0];
 
                 if (storedData.Filters[player.UserIDString].Contains(filter))
                     storedData.Filters[player.UserIDString].Remove(filter);
@@ -2488,16 +2999,27 @@ namespace Oxide.Plugins
                 maxDistance = defaultMaxDistance;
 
             bool showAll = args.Any(arg => arg.Contains("all"));
+            esp.showAll = showAll;
             esp.showBags = args.Any(arg => arg.Contains("bag")) || showAll;
+            esp.showBoats = args.Any(arg => arg.Contains("boats")) || (!uiBtnBoats && trackBoats);
             esp.showBox = args.Any(arg => arg.Contains("box")) || showAll;
+            esp.showBradley = args.Any(arg => arg.Contains("bradley")) || showAll || (!uiBtnBradley && trackBradley);
+            esp.showCargoShips = args.Any(arg => arg.Contains("cargoships")) || showAll || (!uiBtnCargoShips && trackCargoShips);
+            esp.showCars = args.Any(arg => arg.Contains("cars")) || showAll || (!uiBtnCars && trackCars);
+            esp.showCH47 = args.Any(arg => arg.Contains("ch47")) || showAll || (!uiBtnCH47 && trackCH47);
             esp.showCollectible = args.Any(arg => arg.Contains("col")) || showAll;
             esp.showDead = args.Any(arg => arg.Contains("dead")) || showAll;
+            esp.showHeli = args.Any(arg => arg.Contains("heli")) || showAll || (!uiBtnHeli && trackHeli);
             esp.showLoot = args.Any(arg => arg.Contains("loot")) || showAll;
+            esp.showMiniCopter = args.Any(arg => arg.Contains("minicopter")) || showAll || (!uiBtnMiniCopter && trackMiniCopter);
             esp.showNPC = args.Any(arg => arg.Contains("npc")) || showAll;
             esp.showOre = args.Any(arg => arg.Contains("ore")) || showAll;
+            esp.showRidableHorses = args.Any(arg => arg.Contains("horse")) || showAll || (!uiBtnRidableHorses && trackRidableHorses);
+            esp.showRHIB = args.Any(arg => arg.Contains("rhib")) || showAll || (!uiBtnRHIB && trackRigidHullInflatableBoats);
             esp.showSleepers = args.Any(arg => arg.Contains("sleep")) || showAll;
             esp.showStash = args.Any(arg => arg.Contains("stash")) || showAll;
-            esp.showTC = args.Any(arg => arg.Contains("tc")) || showAll;
+            esp.showTC = args.Any(arg => arg.Equals("tc")) || showAll;
+            esp.showTCArrow = args.Any(arg => arg.Equals("tcarrows")) || showAll;
             esp.showTurrets = args.Any(arg => arg.Contains("turret")) || showAll;
             esp.showHT = args.Any(arg => arg.Contains("ht"));
 
@@ -2526,6 +3048,8 @@ namespace Oxide.Plugins
 
         #region UI
 
+        private static string[] uiBtnNames = new string[0];
+        private static Dictionary<int, Dictionary<string, string>> uiButtons;
         private static readonly List<string> radarUI = new List<string>();
         private readonly string UI_PanelName = "AdminRadar_UI";
 
@@ -2537,25 +3061,140 @@ namespace Oxide.Plugins
 
         private void CreateUI(BasePlayer player, Radar esp, bool showAll)
         {
-            var element = UI.CreateElementContainer(UI_PanelName, "0 0 0 0.5", anchorMin, anchorMax, false);
+            var buttonNames = GetButtonNames;
+            var buttons = CreateButtons;
+            string aMin = anchorMin;
+            string aMax = anchorMax;
 
-            UI.CreateButton(ref element, UI_PanelName, showAll ? uiColorOn : uiColorOff, msg("All", player.UserIDString), 10, "0.017 0.739", "0.331 0.957", "espgui all");
-            UI.CreateButton(ref element, UI_PanelName, esp.showBags ? uiColorOn : uiColorOff, msg("Bags", player.UserIDString), 10, "0.017 0.5", "0.331 0.717", "espgui bags");
-            UI.CreateButton(ref element, UI_PanelName, esp.showBox ? uiColorOn : uiColorOff, msg("Box", player.UserIDString), 10, "0.017 0.261", "0.331 0.478", "espgui box");
-            UI.CreateButton(ref element, UI_PanelName, esp.showCollectible ? uiColorOn : uiColorOff, msg("Collectibles", player.UserIDString), 10, "0.017 0.022", "0.331 0.239", "espgui col");
-            UI.CreateButton(ref element, UI_PanelName, esp.showDead ? uiColorOn : uiColorOff, msg("Dead", player.UserIDString), 10, "0.343 0.739", "0.657 0.957", "espgui dead");
-            UI.CreateButton(ref element, UI_PanelName, esp.showLoot ? uiColorOn : uiColorOff, msg("Loot", player.UserIDString), 10, "0.343 0.5", "0.657 0.717", "espgui loot");
-            UI.CreateButton(ref element, UI_PanelName, esp.showNPC ? uiColorOn : uiColorOff, msg("NPC", player.UserIDString), 10, "0.343 0.261", "0.657 0.478", "espgui npc");
-            UI.CreateButton(ref element, UI_PanelName, esp.showOre ? uiColorOn : uiColorOff, msg("Ore", player.UserIDString), 10, "0.343 0.022", "0.657 0.239", "espgui ore");
-            UI.CreateButton(ref element, UI_PanelName, esp.showSleepers ? uiColorOn : uiColorOff, msg("Sleepers", player.UserIDString), 10, "0.669 0.739", "0.984 0.957", "espgui sleepers");
-            UI.CreateButton(ref element, UI_PanelName, esp.showStash ? uiColorOn : uiColorOff, msg("Stash", player.UserIDString), 10, "0.669 0.5", "0.984 0.717", "espgui stash");
-            UI.CreateButton(ref element, UI_PanelName, esp.showTC ? uiColorOn : uiColorOff, msg("TC", player.UserIDString), 10, "0.669 0.261", "0.984 0.478", "espgui tc");
-            UI.CreateButton(ref element, UI_PanelName, esp.showTurrets ? uiColorOn : uiColorOff, msg("Turrets", player.UserIDString), 10, "0.669 0.022", "0.984 0.239", "espgui turrets");
+            if (buttons.Count > 12)
+            {
+                double anchorMinX;
+                if (double.TryParse(anchorMin.Split(' ')[0], out anchorMinX))
+                {
+                    double anchorMinY;
+                    if (double.TryParse(anchorMin.Split(' ')[1], out anchorMinY))
+                    {
+                        double anchorMaxX;
+                        if (double.TryParse(anchorMax.Split(' ')[0], out anchorMaxX))
+                        {
+                            double anchorMaxY;
+                            if (double.TryParse(anchorMax.Split(' ')[1], out anchorMaxY))
+                            {
+                                if (buttons.Count >= 13 && buttons.Count <= 16)
+                                {
+                                    anchorMinX += 0.010;
+                                    anchorMinY += 0.0215;
+                                    anchorMaxX -= 0.0135;
+                                    anchorMaxY -= 0.0135;
 
-            if (!radarUI.Contains(player.UserIDString))
-                radarUI.Add(player.UserIDString);
+                                    aMin = string.Format("{0} {1}", anchorMinX, anchorMinY);
+                                    aMax = string.Format("{0} {1}", anchorMaxX, anchorMaxY);
+                                }
+                                else if (buttons.Count >= 17)
+                                {
+                                    anchorMinX -= 0.024;
+                                    anchorMinY += 0.0175;
+                                    anchorMaxX -= 0.0305;
+                                    anchorMaxY -= 0.0305;
 
+                                    aMin = string.Format("{0} {1}", anchorMinX, anchorMinY);
+                                    aMax = string.Format("{0} {1}", anchorMaxX, anchorMaxY);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            var element = UI.CreateElementContainer(UI_PanelName, "0 0 0 0.0", aMin, aMax, false);
+            int fontSize = buttons.Count > 12 ? 8 : 10;
+
+            for (int x = 0; x < buttonNames.Length; x++)
+            {
+                UI.CreateButton(ref element, UI_PanelName, esp.GetBool(buttonNames[x]) ? uiColorOn : uiColorOff, msg(buttonNames[x], player.UserIDString), fontSize, buttons[x]["Anchor"], buttons[x]["Offset"], "espgui " + buttonNames[x]);
+            }
+
+            radarUI.Add(player.UserIDString);
             CuiHelper.AddUi(player, element);
+        }
+
+        public string[] GetButtonNames
+        {
+            get
+            {
+                if (uiBtnNames.Length == 0)
+                {
+                    var list = new List<string>() { "All" };
+
+                    if (uiBtnBags) list.Add("Bags");
+                    if (uiBtnBoats) list.Add("Boats");
+                    if (uiBtnBox) list.Add("Box");
+                    if (uiBtnBradley) list.Add("Bradley");
+                    if (uiBtnCargoShips) list.Add("CargoShips");
+                    if (uiBtnCars) list.Add("Cars");
+                    if (uiBtnCH47) list.Add("CH47");
+                    if (uiBtnCollectible) list.Add("Collectibles");
+                    if (uiBtnDead) list.Add("Dead");
+                    if (uiBtnHeli) list.Add("Heli");
+                    if (uiBtnLoot) list.Add("Loot");
+                    if (uiBtnMiniCopter) list.Add("MiniCopter");
+                    if (uiBtnNPC) list.Add("NPC");
+                    if (uiBtnOre) list.Add("Ore");
+                    if (uiBtnRidableHorses) list.Add("Horses");
+                    if (uiBtnRHIB) list.Add("RHIB");
+                    if (uiBtnSleepers) list.Add("Sleepers");
+                    if (uiBtnStash) list.Add("Stash");
+                    if (uiBtnTC) list.Add("TC");
+                    if (uiBtnTCArrow) list.Add("TCArrows");
+                    if (uiBtnTurrets) list.Add("Turrets");
+
+                    uiBtnNames = list.ToArray();
+                }
+
+                return uiBtnNames;
+            }
+        }
+
+        public Dictionary<int, Dictionary<string, string>> CreateButtons
+        {
+            get
+            {
+                if (uiButtons == null)
+                {
+                    uiButtons = new Dictionary<int, Dictionary<string, string>>();
+
+                    int amount = uiBtnNames.Length;
+                    double anchorMin = amount > 12 ? 0.011 : 0.017;
+                    double anchorMax = amount > 12 ? 0.675 : 0.739;
+                    double offsetMin = amount > 12 ? 0.275 : 0.331;
+                    double offsetMax = amount > 12 ? 0.957 : 0.957;
+                    double defaultAnchorMax = anchorMax;
+                    double defaultOffsetMax = offsetMax;
+                    int rowMax = 4;
+
+                    for (int count = 0; count < amount; count++)
+                    {
+                        if (count > 0 && count % rowMax == 0)
+                        {
+                            anchorMax = defaultAnchorMax;
+                            offsetMax = defaultOffsetMax;
+                            anchorMin += (amount > 12 ? 0.280 : 0.326);
+                            offsetMin += (amount > 12 ? 0.280 : 0.326);
+                        }
+
+                        uiButtons.Add(count, new Dictionary<string, string>()
+                        {
+                            ["Anchor"] = $"{anchorMin} {anchorMax}",
+                            ["Offset"] = $"{offsetMin} {offsetMax}",
+                        });
+
+                        anchorMax -= (amount > 12 ? 0.329 : 0.239);
+                        offsetMax -= (amount > 12 ? 0.329 : 0.239);
+                    }
+                }
+
+                return uiButtons;
+            }
         }
 
         public class UI // Credit: Absolut
@@ -2635,9 +3274,11 @@ namespace Oxide.Plugins
         private static float playerDistance;
         private static float npcPlayerDistance;
         private static float tcDistance;
+        private static float tcArrowsDistance;
         private static float stashDistance;
         private static float corpseDistance;
         private static float oreDistance;
+        private static float rhDistance;
         private static float lootDistance;
         private static float colDistance;
         private static float bagDistance;
@@ -2661,22 +3302,16 @@ namespace Oxide.Plugins
         private static float trackDrawTime;
         private static float playerOverlapDistance;
         private static int backpackContentAmount;
+        private static int corpseContentAmount;
         private static int groupLimit;
         private static float groupRange;
         private static float groupCountHeight;
         private static int inactiveSeconds;
         private static int inactiveMinutes;
         private static bool showUI;
-
-        private static bool trackMiniCopter;
-        private static bool trackHeli;
-        private static bool trackBradley;
-        private static bool trackCars;
-        private static bool trackCargoShips;
-        private static bool trackCH47;
-        private static bool trackRigidHullInflatableBoats;
-        private static bool trackBoats;
-
+        private static bool showTCAuthedCount;
+        private static bool showTCBagCount;
+        
         private static string distCC;
         private static string heliCC;
         private static string bradleyCC;
@@ -2710,9 +3345,54 @@ namespace Oxide.Plugins
         private static string szChatCommand;
         private static List<object> authorized = new List<object>();
         private static List<string> itemExceptions = new List<string>();
-        private string anchorMin;
 
+        private static bool trackActive = true; // default tracking
+        private static bool trackBags = true;
+        private static bool trackBox = true;
+        private static bool trackCollectibles = true;
+        private static bool trackDead = true;
+        private static bool trackLoot = true;
+        private static bool trackNPC = true;
+        private static bool trackOre = true;
+        private static bool trackSleepers = true;
+        private static bool trackStash = true;
+        private static bool trackSupplyDrops = true;
+        private static bool trackTC = true;
+        private static bool trackTurrets = true;
+        
+        private static bool trackMiniCopter; // additional tracking
+        private static bool trackHeli;
+        private static bool trackBradley;
+        private static bool trackCars;
+        private static bool trackCargoShips;
+        private static bool trackCH47;
+        private static bool trackRidableHorses;
+        private static bool trackRigidHullInflatableBoats;
+        private static bool trackBoats;
+
+        private string anchorMin;
         private string anchorMax;
+        private static bool uiBtnBags;
+        private static bool uiBtnBoats;
+        private static bool uiBtnBox;
+        private static bool uiBtnBradley;
+        private static bool uiBtnCars;
+        private static bool uiBtnCargoShips;
+        private static bool uiBtnCH47;
+        private static bool uiBtnCollectible;
+        private static bool uiBtnDead;
+        private static bool uiBtnHeli;
+        private static bool uiBtnLoot;
+        private static bool uiBtnMiniCopter;
+        private static bool uiBtnNPC;
+        private static bool uiBtnOre;
+        private static bool uiBtnRidableHorses;
+        private static bool uiBtnRHIB;
+        private static bool uiBtnSleepers;
+        private static bool uiBtnStash;
+        private static bool uiBtnTC;
+        private static bool uiBtnTCArrow;
+        private static bool uiBtnTurrets;
 
         //static string voiceSymbol;
         private static bool useVoiceDetection;
@@ -2782,12 +3462,12 @@ namespace Oxide.Plugins
                                 {
                                     if (__(activeDeadCC) == Color.red || __(sleeperDeadCC) == Color.red)
                                     {
-                                        groupColors[key] = "magenta";
+                                        groupColors[key] = "#FF00FF"; // magenta
                                         continue;
                                     }
                                 }
 
-                                if (value.All(c => c >= '0' && c <= '9' || c >= 'a' && c <= 'f' || c >= 'A' && c <= 'F'))
+                                if (IsHex(value))
                                 {
                                     value = "#" + value;
                                 }
@@ -2817,6 +3497,18 @@ namespace Oxide.Plugins
                 };
             }
         }
+
+        private Dictionary<string, string> hexColors = new Dictionary<string, string>
+        {
+            ["<color=blue>"] = "<color=#0000FF>",
+            ["<color=red>"] = "<color=#FF0000>",
+            ["<color=yellow>"] = "<color=#FFFF00>",
+            ["<color=lightblue>"] = "<color=#ADD8E6>",
+            ["<color=orange>"] = "<color=#FFA500>",
+            ["<color=silver>"] = "<color=#C0C0C0>",
+            ["<color=magenta>"] = "<color=#FF00FF>",
+            ["<color=green>"] = "<color=#008000>",
+        };
 
         protected override void LoadDefaultMessages()
         {
@@ -2910,8 +3602,11 @@ namespace Oxide.Plugins
             drawEmptyContainers = Convert.ToBoolean(GetConfig("Options", "Draw Empty Containers", true));
             showResourceAmounts = Convert.ToBoolean(GetConfig("Options", "Show Resource Amounts", true));
             backpackContentAmount = Convert.ToInt32(GetConfig("Options", "Show X Items In Backpacks [0 = amount only]", 3));
+            corpseContentAmount = Convert.ToInt32(GetConfig("Options", "Show X Items On Corpses [0 = amount only]", 0));
             skipUnderworld = Convert.ToBoolean(GetConfig("Options", "Only Show NPCPlayers At World View", false));
-
+            showTCAuthedCount = Convert.ToBoolean(GetConfig("Options", "Show Authed Count On Cupboards", true));
+            showTCBagCount = Convert.ToBoolean(GetConfig("Options", "Show Bag Count On Cupboards", true));
+            
             drawArrows = Convert.ToBoolean(GetConfig("Drawing Methods", "Draw Arrows On Players", false));
             drawBox = Convert.ToBoolean(GetConfig("Drawing Methods", "Draw Boxes", false));
             drawText = Convert.ToBoolean(GetConfig("Drawing Methods", "Draw Text", true));
@@ -2919,10 +3614,10 @@ namespace Oxide.Plugins
             drawX = Convert.ToBoolean(GetConfig("Group Limit", "Draw Distant Players With X", true));
             groupLimit = Convert.ToInt32(GetConfig("Group Limit", "Limit", 4));
             groupRange = Convert.ToSingle(GetConfig("Group Limit", "Range", 50f));
-            groupCountHeight = Convert.ToSingle(GetConfig("Group Limit", "Height Offset [0.0 = disabled]", 0f));
-
-            mcDistance = Convert.ToSingle(GetConfig("Drawing Distances", "MiniCopter", 150f));
-            boatDistance = Convert.ToSingle(GetConfig("Drawing Distances", "Boats", 100f));
+            groupCountHeight = Convert.ToSingle(GetConfig("Group Limit", "Height Offset [0.0 = disabled]", 40f));
+            
+            mcDistance = Convert.ToSingle(GetConfig("Drawing Distances", "MiniCopter", 200f));
+            boatDistance = Convert.ToSingle(GetConfig("Drawing Distances", "Boats", 150f));
             carDistance = Convert.ToSingle(GetConfig("Drawing Distances", "Cars", 500f));
             adDistance = Convert.ToSingle(GetConfig("Drawing Distances", "Airdrop Crates", 400f));
             npcDistance = Convert.ToSingle(GetConfig("Drawing Distances", "Animals", 200));
@@ -2934,8 +3629,10 @@ namespace Oxide.Plugins
             npcPlayerDistance = Convert.ToSingle(GetConfig("Drawing Distances", "NPC Players", 300));
             lootDistance = Convert.ToSingle(GetConfig("Drawing Distances", "Loot Containers", 150));
             oreDistance = Convert.ToSingle(GetConfig("Drawing Distances", "Resources (Ore)", 200));
+            rhDistance = Convert.ToSingle(GetConfig("Drawing Distances", "Ridable Horses", 250));
             stashDistance = Convert.ToSingle(GetConfig("Drawing Distances", "Stashes", 250));
-            tcDistance = Convert.ToSingle(GetConfig("Drawing Distances", "Tool Cupboards", 100));
+            tcDistance = Convert.ToSingle(GetConfig("Drawing Distances", "Tool Cupboards", 150));
+            tcArrowsDistance = Convert.ToSingle(GetConfig("Drawing Distances", "Tool Cupboard Arrows", 250));
             turretDistance = Convert.ToSingle(GetConfig("Drawing Distances", "Turrets", 100));
 
             trackBradley = Convert.ToBoolean(GetConfig("Additional Tracking", "Bradley APC", true));
@@ -2945,6 +3642,7 @@ namespace Oxide.Plugins
             trackHeli = Convert.ToBoolean(GetConfig("Additional Tracking", "Helicopters", true));
             showHeliRotorHealth = Convert.ToBoolean(GetConfig("Additional Tracking", "Helicopter Rotor Health", false));
             trackCH47 = Convert.ToBoolean(GetConfig("Additional Tracking", "CH47", false));
+            trackRidableHorses = Convert.ToBoolean(GetConfig("Additional Tracking", "Ridable Horses", false));
             trackRigidHullInflatableBoats = Convert.ToBoolean(GetConfig("Additional Tracking", "RHIB", false));
             trackBoats = Convert.ToBoolean(GetConfig("Additional Tracking", "Boats", false));
 
@@ -2987,6 +3685,39 @@ namespace Oxide.Plugins
             anchorMax = Convert.ToString(GetConfig("GUI", "Anchor Max", "0.810 0.148"));
             uiColorOn = Convert.ToString(GetConfig("GUI", "Color On", "0.69 0.49 0.29 0.5"));
             uiColorOff = Convert.ToString(GetConfig("GUI", "Color Off", "0.29 0.49 0.69 0.5"));
+            uiBtnBags = Convert.ToBoolean(GetConfig("GUI", "Show Button - Bags", true));
+            uiBtnBoats = Convert.ToBoolean(GetConfig("GUI", "Show Button - Boats", false));
+            uiBtnBradley = Convert.ToBoolean(GetConfig("GUI", "Show Button - Bradley", false));
+            uiBtnBox = Convert.ToBoolean(GetConfig("GUI", "Show Button - Box", true));
+            uiBtnCars = Convert.ToBoolean(GetConfig("GUI", "Show Button - Cars", false));
+            uiBtnCargoShips = Convert.ToBoolean(GetConfig("GUI", "Show Button - CargoShips", false));
+            uiBtnCH47 = Convert.ToBoolean(GetConfig("GUI", "Show Button - CH47", false));
+            uiBtnCollectible = Convert.ToBoolean(GetConfig("GUI", "Show Button - Collectibles", true));
+            uiBtnDead = Convert.ToBoolean(GetConfig("GUI", "Show Button - Dead", true));
+            uiBtnHeli = Convert.ToBoolean(GetConfig("GUI", "Show Button - Heli", false));
+            uiBtnLoot = Convert.ToBoolean(GetConfig("GUI", "Show Button - Loot", true));
+            uiBtnMiniCopter = Convert.ToBoolean(GetConfig("GUI", "Show Button - MiniCopter", false));
+            uiBtnNPC = Convert.ToBoolean(GetConfig("GUI", "Show Button - NPC", true));
+            uiBtnOre = Convert.ToBoolean(GetConfig("GUI", "Show Button - Ore", true));
+            uiBtnRidableHorses = Convert.ToBoolean(GetConfig("GUI", "Show Button - Ridable Horses", false));
+            uiBtnRHIB = Convert.ToBoolean(GetConfig("GUI", "Show Button - RigidHullInflatableBoats", false));
+            uiBtnSleepers = Convert.ToBoolean(GetConfig("GUI", "Show Button - Sleepers", true));
+            uiBtnStash = Convert.ToBoolean(GetConfig("GUI", "Show Button - Stash", true));
+            uiBtnTC = Convert.ToBoolean(GetConfig("GUI", "Show Button - TC", true));
+            uiBtnTCArrow = Convert.ToBoolean(GetConfig("GUI", "Show Button - TC Arrow", true));
+            uiBtnTurrets = Convert.ToBoolean(GetConfig("GUI", "Show Button - Turrets", true));
+
+            if (!anchorMin.Contains(" ")) anchorMin = "0.667 0.020";
+            if (!anchorMax.Contains(" ")) anchorMax = "0.810 0.148";
+            if (uiBtnBoats) trackBoats = true;
+            if (uiBtnBradley) trackBradley = true;
+            if (uiBtnCars) trackCars = true;
+            if (uiBtnCargoShips) trackCargoShips = true;
+            if (uiBtnCH47) trackCH47 = true;
+            if (uiBtnHeli) trackHeli = true;
+            if (uiBtnMiniCopter) trackMiniCopter = true;
+            if (uiBtnRidableHorses) trackRidableHorses = true;
+            if (uiBtnRHIB) trackRigidHullInflatableBoats = true;
 
             useGroupColors = Convert.ToBoolean(GetConfig("Group Limit", "Use Group Colors Configuration", true));
             groupColorDead = Convert.ToString(GetConfig("Group Limit", "Dead Color", "#ff0000"));
@@ -3073,33 +3804,17 @@ namespace Oxide.Plugins
 
         private string msg(string key, string id = null, params object[] args)
         {
-            string message = id == null ? RemoveFormatting(lang.GetMessage(key, this, id)) : lang.GetMessage(key, this, id);
+            var sb = new StringBuilder(id == null ? RemoveFormatting(lang.GetMessage(key, this, id)) : lang.GetMessage(key, this, id));
 
-            if (message.Contains("=blue"))
-                message = message.Replace("=blue", "=#0000FF");
-
-            if (message.Contains("=red"))
-                message = message.Replace("=red", "=#FF0000");
-
-            if (message.Contains("=yellow"))
-                message = message.Replace("=yellow", "=#FFFF00");
-
-            if (message.Contains("=lightblue"))
-                message = message.Replace("=lightblue", "=#ADD8E6");
-
-            if (message.Contains("=orange"))
-                message = message.Replace("=orange", "=#FFA500");
-
-            if (message.Contains("=silver"))
-                message = message.Replace("=silver", "=#C0C0C0");
-
-            if (message.Contains("=magenta"))
-                message = message.Replace("=magenta", "=#FF00FF");
-
-            if (message.Contains("=green"))
-                message = message.Replace("=green", "=#008000");
-
-            return args.Length > 0 ? string.Format(message, args) : message;
+            foreach(var entry in hexColors)
+            {
+                if (sb.ToString().Contains(entry.Key))
+                {
+                    sb.Replace(entry.Key, entry.Value);
+                }
+            }
+            
+            return args.Length > 0 ? string.Format(sb.ToString(), args) : sb.ToString();
         }
 
         private string RemoveFormatting(string source)

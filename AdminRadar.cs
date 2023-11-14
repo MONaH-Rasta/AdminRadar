@@ -30,7 +30,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("Admin Radar", "nivex", "4.8.0")]
+    [Info("Admin Radar", "nivex", "4.8.1")]
     [Description("Radar tool for Admins and Developers.")]
     class AdminRadar : RustPlugin
     {
@@ -1611,6 +1611,7 @@ namespace Oxide.Plugins
             Unsubscribe(nameof(OnPlayerDisconnected));
             Unsubscribe(nameof(OnPlayerVoice));
             Unsubscribe(nameof(OnPlayerInit));
+            Unsubscribe(nameof(OnPlayerSleepEnded));
         }
 
         private void Loaded()
@@ -1661,6 +1662,7 @@ namespace Oxide.Plugins
             Subscribe(nameof(OnEntityDeath));
             Subscribe(nameof(OnEntityKill));
             Subscribe(nameof(OnEntitySpawned));
+            Subscribe(nameof(OnPlayerSleepEnded));
 
             coroutine = ServerMgr.Instance.StartCoroutine(FillCache());
 
@@ -1684,7 +1686,10 @@ namespace Oxide.Plugins
             {
                 accessList.Add(player);
             }
+        }
 
+        private void OnPlayerSleepEnded(BasePlayer player)
+        {
             if (player != null && player.IsConnected && player.GetComponent<Radar>() == null && permission.UserHasPermission(player.UserIDString, permAuto) && HasAccess(player))
             {
                 cmdESP(player, "radar", new string[0]);

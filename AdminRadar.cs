@@ -12,7 +12,7 @@ using Random = UnityEngine.Random;
 
 namespace Oxide.Plugins
 {
-    [Info("Admin Radar", "nivex", "4.5.3")]
+    [Info("Admin Radar", "nivex", "4.5.4")]
     [Description("Radar tool for Admins and Developers.")]
     public class AdminRadar : RustPlugin
     {
@@ -51,7 +51,6 @@ namespace Oxide.Plugins
             public VendingMachineMapMarker vending, personal;
             public Vector3 lastPosition;
             public string markerName, uid;
-            private float lastTick;
 
             public bool IsPrivilegeMarker
             {
@@ -61,10 +60,15 @@ namespace Oxide.Plugins
                 }
             }
 
-            public bool IsScientist(BaseNetworkable entity)
+            private string Scientist()
             {
                 var player = entity as BasePlayer;
-                return entity is Scientist || entity is HTNPlayer || (player != null && player.displayName == player.userID.ToString());
+                return entity is Scientist || entity is HTNPlayer || (player != null && player.displayName == player.userID.ToString()) ? ins.msg("scientist") : null;
+            }
+
+            private string MurdererOrScarecrow()
+            {
+                return entity.ShortPrefabName == "scarecrow" || entity.ShortPrefabName == "murderer" ? ins.msg(entity.ShortPrefabName) : null;
             }
 
             private void Awake()
@@ -73,52 +77,28 @@ namespace Oxide.Plugins
                 player = GetComponent<BasePlayer>();
                 entity = gameObject.ToBaseEntity();
                 uid = player?.UserIDString ?? Guid.NewGuid().ToString();
-                markerName = IsScientist(entity) ? ins.msg("scientist") : player?.displayName ?? ins.msg(entity.ShortPrefabName);
+                markerName = MurdererOrScarecrow() ?? Scientist() ?? player?.displayName ?? ins.msg(entity.ShortPrefabName);
                 lastPosition = transform.position;
                 markers[uid] = this;
-                lastTick = Time.time;
 
                 if (IsPrivilegeMarker)
                 {
-                    UpdatePrivilegeMarker();
+                    return;
                 }
-                else
+
+                CreateMarker();
+
+                if (!useNpcUpdateTracking && entity != null && entity.IsNpc)
                 {
-                    UpdateMarker();
+                    return;
                 }
+
+                InvokeRepeating(new Action(RefreshMarker), 1f, 1f);
             }
-
-            private void FixedUpdate()
-            {
-                if (IsPrivilegeMarker || (!useNpcUpdateTracking && entity != null && entity.IsNpc))
-                {
-                    return;
-                }
-
-                if (entity == null || entity.transform == null || entity.IsDestroyed)
-                {
-                    Destroy(this);
-                    return;
-                }
-
-                if (Time.time - lastTick < 1f)
-                {
-                    return;
-                }
-
-                lastTick = Time.time;
-
-                if (Vector3.Distance(entity.transform.position, lastPosition) <= markerOverlapDistance)
-                {
-                    return;
-                }
-
-                lastPosition = entity.transform.position;
-                UpdateMarker();
-            }
-
+            
             private void OnDestroy()
             {
+                CancelInvoke(new Action(RefreshMarker));
                 RemoveMarker();
                 markers.Remove(uid);
                 Destroy(this);
@@ -129,7 +109,41 @@ namespace Oxide.Plugins
                 return markers.Values.Any(e => e.vending == entity || e.personal == entity || e.generic == entity);
             }
 
-            public void UpdateMarker()
+            public void RefreshMarker()
+            {
+                if (entity == null || entity.transform == null || entity.IsDestroyed)
+                {
+                    Destroy(this);
+                    return;
+                }
+
+                if (Vector3.Distance(entity.transform.position, lastPosition) <= markerOverlapDistance)
+                {
+                    return;
+                }
+
+                lastPosition = entity.transform.position;
+
+                if (vending != null && vending.transform != null && !vending.IsDestroyed)
+                {
+                    if (generic != null && generic.transform != null && !generic.IsDestroyed)
+                    {
+                        vending.markerShopName = GetMarkerShopName();
+                        vending.transform.position = lastPosition;
+                        vending.transform.hasChanged = true;
+                        generic.transform.position = lastPosition;
+                        generic.transform.hasChanged = true;
+                        generic.SendUpdate();
+                        vending.SendNetworkUpdate();
+                        generic.SendNetworkUpdate();
+                        return;
+                    }
+                }
+
+                CreateMarker();
+            }
+            
+            public void CreateMarker()
             {
                 RemoveMarker();
 
@@ -137,18 +151,7 @@ namespace Oxide.Plugins
 
                 if (vending != null)
                 {
-                    var sb = new StringBuilder();
-
-                    sb.AppendLine(markerName);
-
-                    foreach (var marker in markers.Values.Where(t => t != this && !string.IsNullOrEmpty(t.markerName) && Vector3.Distance(t.lastPosition, lastPosition) <= markerOverlapDistance).ToList())
-                    {
-                        if (marker.IsPrivilegeMarker) sb.AppendLine(ins.msg("TC"));
-                        sb.AppendLine(marker.markerName);
-                    }
-
-                    sb.Length--;
-                    vending.markerShopName = sb.ToString();
+                    vending.markerShopName = GetMarkerShopName();
                     vending.enabled = false;
                     vending.Spawn();
                 }
@@ -168,53 +171,8 @@ namespace Oxide.Plugins
                     generic.SendUpdate();
                 }
             }
-
-            private Color GetNpcColor()
-            {
-                switch (entity.ShortPrefabName)
-                {
-                    case "bear":
-                        return bearColor;
-                    case "boar":
-                        return boarColor;
-                    case "chicken":
-                        return chickenColor;
-                    case "wolf":
-                        return wolfColor;
-                    case "stag":
-                        return stagColor;
-                    case "horse":
-                        return horseColor;
-                    case "murderer":
-                        return __(murdererCC);
-                    case "bandit_guard":
-                    case "bandit_shopkeeper":
-                    case "scientist":
-                    case "scientistjunkpile":
-                    case "scientiststationary":
-                        return __(scientistCC);
-                    case "scientistpeacekeeper":
-                        return __(peacekeeperCC);
-                    case "scientist_astar_full_any":
-                    case "scientist_full_any":
-                    case "scientist_full_lr300":
-                    case "scientist_full_mp5":
-                    case "scientist_full_pistol":
-                    case "scientist_full_shotgun":
-                    case "scientist_turret_any":
-                    case "scientist_turret_lr300":
-                        return __(htnscientistCC);
-                    default:
-                        return defaultNpcColor;
-                }
-            }
-
-            public void UpdatePrivilegeMarker()
-            {
-                UpdatePrivilegeMarker(markerName);
-            }
-
-            public void UpdatePrivilegeMarker(string newMarkerName)
+            
+            public void CreatePrivilegeMarker(string newMarkerName)
             {
                 if (privilege == null || privilege.transform == null || privilege.IsDestroyed)
                 {
@@ -224,12 +182,12 @@ namespace Oxide.Plugins
 
                 RemoveMarker();
 
-                markerName = newMarkerName;
+                markerName = string.Format("{0}{1}{2}", ins.msg("TC"), Environment.NewLine, newMarkerName);
                 vending = GameManager.server.CreateEntity(vendingPrefab, privilege.transform.position) as VendingMachineMapMarker;
 
                 if (vending != null)
                 {
-                    vending.markerShopName = string.Format("{0}\n{1}", ins.msg("TC"), markerName);
+                    vending.markerShopName = GetMarkerShopName();
                     vending.enabled = false;
                     vending.Spawn();
                 }
@@ -276,6 +234,67 @@ namespace Oxide.Plugins
                 {
                     vending.Kill();
                 }
+            }
+
+            private Color GetNpcColor()
+            {
+                switch (entity.ShortPrefabName)
+                {
+                    case "bear":
+                        return bearColor;
+                    case "boar":
+                        return boarColor;
+                    case "chicken":
+                        return chickenColor;
+                    case "wolf":
+                        return wolfColor;
+                    case "stag":
+                        return stagColor;
+                    case "horse":
+                        return horseColor;
+                    case "murderer":
+                        return __(murdererCC);
+                    case "bandit_guard":
+                    case "bandit_shopkeeper":
+                    case "scientist":
+                    case "scientistjunkpile":
+                    case "scientiststationary":
+                        return __(scientistCC);
+                    case "scientistpeacekeeper":
+                        return __(peacekeeperCC);
+                    case "scientist_astar_full_any":
+                    case "scientist_full_any":
+                    case "scientist_full_lr300":
+                    case "scientist_full_mp5":
+                    case "scientist_full_pistol":
+                    case "scientist_full_shotgun":
+                    case "scientist_turret_any":
+                    case "scientist_turret_lr300":
+                    case "scarecrow":
+                        return __(htnscientistCC);
+                    default:
+                        return defaultNpcColor;
+                }
+            }
+
+            private string GetMarkerShopName()
+            {
+                var sb = new StringBuilder();
+
+                sb.AppendLine(markerName);
+
+                foreach (var marker in markers.Values.Where(t => t != this && !string.IsNullOrEmpty(t.markerName) && Vector3.Distance(t.lastPosition, lastPosition) <= markerOverlapDistance).ToList())
+                {
+                    if (marker.IsPrivilegeMarker)
+                    {
+                        sb.AppendLine(ins.msg("TC"));
+                        sb.AppendLine($"> {marker.markerName}");
+                    }
+                    else sb.AppendLine(marker.markerName);
+                }
+
+                sb.Length--;
+                return sb.ToString();
             }
         }
 
@@ -1129,6 +1148,8 @@ namespace Oxide.Plugins
                     if (objectsLimit > 0 && ++drawnObjects > objectsLimit) return false;
                 }
 
+                float k = TerrainMeta.HeightMap.GetHeight(source.transform.position);
+
                 entityType = EntityType.Npc;
                 foreach (var target in cache.NPCPlayers.Where(target => target != null && target.transform != null && !target.IsDestroyed))
                 {
@@ -1140,8 +1161,7 @@ namespace Oxide.Plugins
                     if (skipUnderworld)
                     {
                         float j = TerrainMeta.HeightMap.GetHeight(target.transform.position);
-                        float k = TerrainMeta.HeightMap.GetHeight(source.transform.position);
-
+                        
                         if (j > target.transform.position.y)
                         {
                             if (source.transform.position.y > k)
@@ -1309,7 +1329,6 @@ namespace Oxide.Plugins
             }
         }
 
-        private static bool isLoading = true;
         private const string permName = "adminradar.allowed";
         private const string permBypass = "adminradar.bypass";
         private const string genericPrefab = "assets/prefabs/tools/map/genericradiusmarker.prefab";
@@ -1322,10 +1341,12 @@ namespace Oxide.Plugins
         private static readonly List<string> tags = new List<string>
             {"ore", "cluster", "1", "2", "3", "4", "5", "6", "_", ".", "-", "deployed", "wooden", "large", "pile", "prefab", "collectable", "loot", "small"}; // strip these from names to reduce the size of the text and make it more readable
 
+        private readonly Dictionary<ulong, Color> playersColor = new Dictionary<ulong, Color>();
+        private readonly List<BasePlayer> accessList = new List<BasePlayer>();
+        
         private static readonly Dictionary<ulong, SortedDictionary<float, Vector3>> trackers = new Dictionary<ulong, SortedDictionary<float, Vector3>>(); // player id, timestamp and player's position
         private static readonly Dictionary<ulong, Timer> voices = new Dictionary<ulong, Timer>();
         private static readonly Dictionary<ulong, Timer> trackerTimers = new Dictionary<ulong, Timer>();
-        private static readonly Dictionary<ulong, Color> playersColor = new Dictionary<ulong, Color>();
         private static readonly Dictionary<string, Marker> markers = new Dictionary<string, Marker>();
         private static readonly List<Radar> activeRadars = new List<Radar>();
         private static Cache cache = new Cache();
@@ -1339,7 +1360,6 @@ namespace Oxide.Plugins
         private void Init()
         {
             ins = this;
-            isLoading = true;
             Unsubscribe(nameof(OnEntityDeath));
             Unsubscribe(nameof(OnEntityKill));
             Unsubscribe(nameof(OnEntitySpawned));
@@ -1391,7 +1411,6 @@ namespace Oxide.Plugins
 
             if (barebonesMode)
             {
-                isLoading = false;
                 return;
             }
 
@@ -1400,15 +1419,12 @@ namespace Oxide.Plugins
                 Subscribe(nameof(OnPlayerSleepEnded));
             }
 
+            Subscribe(nameof(OnPlayerInit));
+            Subscribe(nameof(OnPlayerDisconnected));
+
             if (usePlayerMarkers || useSleeperMarkers || usePrivilegeMarkers)
             {
-                Subscribe(nameof(OnPlayerInit));
                 Subscribe(nameof(CanNetworkTo));
-
-                if (!useVoiceDetection)
-                {
-                    Subscribe(nameof(OnPlayerDisconnected));
-                }
             }
 
             if (usePlayerTracker || usePlayerMarkers)
@@ -1420,7 +1436,7 @@ namespace Oxide.Plugins
                         Track(player);
                     }
 
-                    if (usePlayerMarkers)
+                    if (usePlayerMarkers && !coList.Contains(player))
                     {
                         coList.Add(player);
                     }
@@ -1431,7 +1447,7 @@ namespace Oxide.Plugins
             {
                 foreach (var player in BasePlayer.sleepingPlayerList)
                 {
-                    if (!coList.Contains(player) && player.net != null)
+                    if (!coList.Contains(player))
                     {
                         coList.Add(player);
                     }
@@ -1446,13 +1462,9 @@ namespace Oxide.Plugins
             }
 
             var tick = DateTime.Now;
-
-            Subscribe(nameof(OnEntityDeath));
-            Subscribe(nameof(OnEntityKill));
-            Subscribe(nameof(OnEntitySpawned));
-
             int cached = 0, total = 0;
-            foreach (var e in BaseNetworkable.serverEntities.Cast<BaseEntity>())
+
+            foreach (var e in BaseNetworkable.serverEntities.OfType<BaseEntity>())
             {
                 if (AddToCache(e))
                     cached++;
@@ -1460,9 +1472,11 @@ namespace Oxide.Plugins
                 total++;
             }
 
-            isLoading = false;
             Puts("Took {0}ms to cache {1}/{2} entities", (DateTime.Now - tick).TotalMilliseconds, cached, total);
             StartCreateMapMarkersCoroutine();
+            Subscribe(nameof(OnEntityDeath));
+            Subscribe(nameof(OnEntityKill));
+            Subscribe(nameof(OnEntitySpawned));
         }
 
         private void OnCupboardAuthorize(BuildingPrivlidge privilege, BasePlayer player)
@@ -1545,11 +1559,21 @@ namespace Oxide.Plugins
             if (player == null)
                 return;
 
-            StartUpdateMapMarkersCoroutine(player);
-
-            if (player.gameObject.GetComponent<Marker>() == null)
+            if (usePlayerMarkers)
             {
-                player.gameObject.AddComponent<Marker>();
+                StartUpdateMapMarkersCoroutine(player);
+
+                if (player.gameObject.GetComponent<Marker>() == null)
+                {
+                    coList.Add(player);
+                }
+            }
+
+            accessList.RemoveAll(p => p == null || p == player || !p.IsConnected);
+
+            if (player.IsAdmin || HasAccess(player))
+            {
+                accessList.Add(player);
             }
         }
 
@@ -1586,8 +1610,8 @@ namespace Oxide.Plugins
                 var marker = player.gameObject.GetComponent<Marker>();
 
                 if (marker != null)
-                    marker.UpdateMarker();
-                else player.gameObject.AddComponent<Marker>();
+                    marker.RefreshMarker();
+                else coList.Add(player);
             }
             else if (usePlayerMarkers)
             {
@@ -1598,6 +1622,8 @@ namespace Oxide.Plugins
                     UnityEngine.Object.Destroy(marker);
                 }
             }
+
+            accessList.RemoveAll(p => p == null || p == player || !p.IsConnected);
         }
 
         private void Unload()
@@ -1674,12 +1700,12 @@ namespace Oxide.Plugins
             {
                 foreach (var pnid in privilege.authorizedPlayers)
                 {
-                    sb.AppendLine(pnid.username);
+                    sb.AppendLine($"> {pnid.username}");
                 }
 
                 if (player != null)
                 {
-                    sb.AppendLine(player.displayName);
+                    sb.AppendLine($"> {player.displayName}");
                 }
             }
             else if (action == CupboardAction.Deauthorize)
@@ -1691,7 +1717,7 @@ namespace Oxide.Plugins
                         continue;
                     }
 
-                    sb.AppendLine(pnid.username);
+                    sb.AppendLine($"> {pnid.username}");
                 }
             }
 
@@ -1714,7 +1740,7 @@ namespace Oxide.Plugins
                 pt = privilege.gameObject.AddComponent<Marker>();
             }
 
-            pt.UpdatePrivilegeMarker(sb.ToString());
+            pt.CreatePrivilegeMarker(sb.ToString());
         }
 
         private static void DrawVision(BasePlayer player, BasePlayer target, float invokeTime)
@@ -1762,35 +1788,31 @@ namespace Oxide.Plugins
 
         private static void RemoveFromCache(BaseEntity entity)
         {
-            if (!init || entity == null)
-                return;
-
-            if (cache.Entities.Remove(entity))
+            if (entity == null || cache.Entities.Remove(entity))
             {
                 return;
             }
 
-            if (entity.transform != null)
-            {
-                if (cache.Ores.ContainsKey(entity.transform.position))
-                    cache.Ores.Remove(entity.transform.position);
-                else if (cache.Bags.ContainsKey(entity.transform.position))
-                    cache.Bags.Remove(entity.transform.position);
-                else if (cache.Turrets.ContainsKey(entity.transform.position))
-                    cache.Turrets.Remove(entity.transform.position);
-                else if (cache.Collectibles.ContainsKey(entity.transform.position))
-                    cache.Collectibles.Remove(entity.transform.position);
-            }
-            else if (entity is DroppedItemContainer)
-                cache.Backpacks.Remove(entity as DroppedItemContainer);
+            var position = entity.transform?.position ?? Vector3.zero;
+
+            if (cache.Ores.ContainsKey(position))
+                cache.Ores.Remove(position);
             else if (entity is StorageContainer)
                 cache.Containers.Remove(entity as StorageContainer);
+            else if (cache.Collectibles.ContainsKey(position))
+                cache.Collectibles.Remove(position);
             else if (entity is BaseNpc)
                 cache.Animals.Remove(entity as BaseNpc);
-            else if (entity is BaseHelicopter)
-                cache.Helicopters.Remove(entity as BaseHelicopter);
             else if (entity is PlayerCorpse)
                 cache.Corpses.Remove(entity as PlayerCorpse);
+            else if (cache.Bags.ContainsKey(position))
+                cache.Bags.Remove(position);
+            else if (entity is DroppedItemContainer)
+                cache.Backpacks.Remove(entity as DroppedItemContainer);
+            else if (entity is BaseHelicopter)
+                cache.Helicopters.Remove(entity as BaseHelicopter);
+            else if (cache.Turrets.ContainsKey(position))
+                cache.Turrets.Remove(position);
             else if (entity is Zombie)
                 cache.Zombies.Remove(entity as Zombie);
         }
@@ -1800,9 +1822,8 @@ namespace Oxide.Plugins
         private void StartCreateMapMarkersCoroutine()
         {
             if (coList.Count > 0)
-            {
                 ServerMgr.Instance.StartCoroutine(CreateMapMarkers());
-            }
+            else CoListManager();
         }
 
         private System.Collections.IEnumerator CreateMapMarkers()
@@ -1827,6 +1848,7 @@ namespace Oxide.Plugins
             ServerMgr.Instance.StopCoroutine(CreateMapMarkers());
             watch.Stop();
             Puts("Finished creating map markers in {0} seconds!", watch.Elapsed.TotalSeconds);
+            CoListManager();
         }
 
         private void StartUpdateMapMarkersCoroutine(BasePlayer player)
@@ -1846,12 +1868,12 @@ namespace Oxide.Plugins
                     {
                         if (allowed || (usePrivilegeMarkers && marker.privilege.IsAuthed(player)))
                         {
-                            marker.UpdatePrivilegeMarker();
+                            marker.CreatePrivilegeMarker(marker.markerName);
                         }
                     }
                     else if (allowed)
                     {
-                        marker.UpdateMarker();
+                        marker.CreateMarker();
                     }
 
                     yield return new WaitForSeconds(0.1f);
@@ -1861,23 +1883,59 @@ namespace Oxide.Plugins
             ServerMgr.Instance.StopCoroutine("UpdateMapMarkers");
         }
 
+        private void CoListManager()
+        {
+            timer.Once(0.1f, () => CoListManager());
+
+            coList.RemoveAll(e => e == null || e.transform == null || e.IsDestroyed || e.gameObject.GetComponent<Marker>() != null);
+
+            if (coList.Count == 0)
+            {
+                return;
+            }
+
+            var entity = coList.First();
+
+            if (entity is BuildingPrivlidge)
+            {
+                if (BasePlayer.activePlayerList.Any()) // TODO: implement better solution for this check
+                {
+                    SetupPrivilegeMarker(entity as BuildingPrivlidge, CupboardAction.Authorize, null);
+                    coList.Remove(entity);
+                }
+
+                return;
+            }
+
+            if (!accessList.Any())
+            {
+                foreach(var marker in markers.Values.ToList())
+                {
+                    if (!marker.IsPrivilegeMarker)
+                    {
+                        UnityEngine.Object.Destroy(marker);
+                    }
+                }
+
+                return;
+            }
+
+            entity.gameObject.AddComponent<Marker>();
+            coList.Remove(entity);
+        }
+
         private bool AddToCache(BaseEntity entity)
         {
-            if (!init || entity?.transform == null || entity.IsDestroyed)
+            if (entity == null || entity.transform == null || entity.IsDestroyed)
                 return false;
+
+            var position = entity.transform.position;
 
             if (entity.IsNpc)
             {
-                if (useHumanoidTracker && !(entity is BaseNpc) || useAnimalTracker && entity is BaseNpc)
+                if (!coList.Contains(entity) && ((useHumanoidTracker && !(entity is BaseNpc)) || (useAnimalTracker && entity is BaseNpc)))
                 {
-                    if (isLoading)
-                    {
-                        if (!coList.Contains(entity))
-                        {
-                            coList.Add(entity);
-                        }
-                    }
-                    else entity.gameObject.AddComponent<Marker>();
+                    coList.Add(entity);
                 }
 
                 if (entity is BaseNpc)
@@ -1900,68 +1958,27 @@ namespace Oxide.Plugins
                         return true;
                     }
                 }
+                else if (entity is Zombie)
+                {
+                    var zombie = entity as Zombie;
+
+                    if (!cache.Zombies.Contains(zombie))
+                    {
+                        cache.Zombies.Add(zombie);
+                        return true;
+                    }
+                }
+
+                return false;
             }
 
-            if (trackCargoShips && entity is CargoShip)
-            {
-                if (!cache.Entities.Contains(entity))
-                {
-                    cache.Entities.Add(entity);
-                    return true;
-                }
-            }
-            else if (trackCars && entity is BaseCar)
-            {
-                if (!cache.Entities.Contains(entity))
-                {
-                    cache.Entities.Add(entity);
-                    return true;
-                }
-            }
-            else if (entity is Zombie)
-            {
-                var zombie = entity as Zombie;
-
-                if (!cache.Zombies.Contains(zombie))
-                {
-                    cache.Zombies.Add(zombie);
-                    return true;
-                }
-            }
-            else if (entity is BaseHelicopter && trackHeli)
-            {
-                var heli = entity as BaseHelicopter;
-
-                if (!cache.Helicopters.Contains(heli))
-                {
-                    cache.Helicopters.Add(heli);
-                    return true;
-                }
-            }
-            else if (entity is BradleyAPC && trackBradley)
-            {
-                var bradley = entity as BradleyAPC;
-
-                if (!cache.BradleyAPCs.Contains(bradley))
-                {
-                    cache.BradleyAPCs.Add(bradley);
-                    return true;
-                }
-            }
-            else if (entity is BuildingPrivlidge && entity.transform != null)
+            if (entity is BuildingPrivlidge)
             {
                 var priv = entity as BuildingPrivlidge;
 
-                if (usePrivilegeMarkers && priv.AnyAuthed())
+                if (usePrivilegeMarkers && priv.AnyAuthed() && !coList.Contains(entity))
                 {
-                    if (isLoading)
-                    {
-                        if (!coList.Contains(entity))
-                        {
-                            coList.Add(entity);
-                        }
-                    }
-                    else SetupPrivilegeMarker(priv, CupboardAction.Authorize, null);
+                    coList.Add(entity);
                 }
 
                 if (!cache.Cupboards.Contains(priv))
@@ -1969,37 +1986,31 @@ namespace Oxide.Plugins
                     cache.Cupboards.Add(priv);
                     return true;
                 }
-            }
-            else if (entity is SupplyDrop)
-            {
-                var supplyDrop = entity as SupplyDrop;
 
-                if (!cache.SupplyDrops.Contains(supplyDrop))
-                {
-                    cache.SupplyDrops.Add(supplyDrop);
-                    return true;
-                }
+                return false;
             }
             else if (entity is StorageContainer)
             {
+                var container = entity as StorageContainer;
+
                 if (entity.name.Contains("turret"))
                 {
-                    if (!cache.Turrets.ContainsKey(entity.transform.position))
+                    if (!cache.Turrets.ContainsKey(position))
                     {
-                        cache.Turrets.Add(entity.transform.position, new CachedInfo { Size = 1f, Info = entity.GetComponent<StorageContainer>()?.inventory?.itemList?.Select(item => item.amount).Sum() ?? 0 });
+                        cache.Turrets.Add(position, new CachedInfo { Size = 1f, Info = container.inventory?.itemList?.Select(item => item.amount).Sum() ?? 0 });
                         return true;
                     }
                 }
                 else if (entity.name.Contains("box") || entity.ShortPrefabName.Equals("heli_crate") || entity.name.Contains("loot") || entity.name.Contains("crate_") || entity.name.Contains("stash") || entity.name.Contains("oil") || entity.name.Contains("hackable"))
                 {
-                    var container = entity as StorageContainer;
-
                     if (!cache.Containers.Contains(container))
                     {
                         cache.Containers.Add(container);
                         return true;
                     }
                 }
+
+                return false;
             }
             else if (entity is DroppedItemContainer) //entity.ShortPrefabName.Equals("item_drop_backpack"))
             {
@@ -2010,14 +2021,29 @@ namespace Oxide.Plugins
                     cache.Backpacks.Add(backpack);
                     return true;
                 }
+
+                return false;
             }
-            else if (entity is SleepingBag)
+            else if (entity is CollectibleEntity)
             {
-                if (!cache.Bags.ContainsKey(entity.transform.position))
+                if (!cache.Collectibles.ContainsKey(position))
                 {
-                    cache.Bags.Add(entity.transform.position, new CachedInfo { Size = 0.5f });
+                    cache.Collectibles.Add(position, new CachedInfo { Name = _(entity.ShortPrefabName), Size = 0.5f, Info = Math.Ceiling(entity.GetComponent<CollectibleEntity>()?.itemList?.Select(item => item.amount).Sum() ?? 0) });
                     return true;
                 }
+
+                return false;
+            }
+            else if (entity is OreResourceEntity)
+            {
+                if (!cache.Ores.ContainsKey(position))
+                {
+                    float amount = entity.GetComponentInParent<ResourceDispenser>().containedItems.Select(item => item.amount).Sum();
+                    cache.Ores.Add(position, new CachedInfo { Name = _(entity.ShortPrefabName), Info = amount });
+                    return true;
+                }
+
+                return false;
             }
             else if (entity is PlayerCorpse)
             {
@@ -2025,66 +2051,122 @@ namespace Oxide.Plugins
 
                 if (!cache.Corpses.ContainsKey(corpse) && corpse.playerSteamID.IsSteamId())
                 {
-                    int amount = 0;
-
-                    if (corpse.containers != null)
-                        foreach (var container in corpse.containers)
-                            amount += container.itemList.Count;
-
+                    int amount = corpse.containers?.Sum(x => x.itemList.Count) ?? 0;
                     cache.Corpses.Add(corpse, new CachedInfo { Name = corpse.parentEnt?.ToString() ?? corpse.playerSteamID.ToString(), Info = amount });
                     return true;
                 }
-            }
-            else if (entity is CollectibleEntity)
-            {
-                if (!cache.Collectibles.ContainsKey(entity.transform.position))
-                {
-                    cache.Collectibles.Add(entity.transform.position, new CachedInfo { Name = _(entity.ShortPrefabName), Size = 0.5f, Info = Math.Ceiling(entity.GetComponent<CollectibleEntity>()?.itemList?.Select(item => item.amount).Sum() ?? 0) });
-                    return true;
-                }
-            }
-            else if (entity.name.Contains("-ore"))
-            {
-                if (!cache.Ores.ContainsKey(entity.transform.position))
-                {
-                    cache.Ores.Add(entity.transform.position, new CachedInfo { Name = _(entity.ShortPrefabName), Info = Math.Ceiling(entity.GetComponentInParent<ResourceDispenser>()?.containedItems?.Select(item => item.amount).Sum() ?? 0) });
-                    return true;
-                }
-            }
-            else if (entity is RHIB)
-            {
-                if (!cache.Entities.Contains(entity) && trackRigidHullInflatableBoats)
-                {
-                    cache.Entities.Add(entity);
-                    return true;
-                }
-            }
-            else if (entity is BaseBoat && trackBoats)
-            {
-                if (!cache.Entities.Contains(entity))
-                {
-                    cache.Entities.Add(entity);
-                    return true;
-                }
-            }
-            else if (entity is CH47Helicopter && trackCH47)
-            {
-                if (!cache.Entities.Contains(entity))
-                {
-                    cache.Entities.Add(entity);
-                    return true;
-                }
-            }
 
+                return false;
+            }
+            else if (entity is SleepingBag)
+            {
+                if (!cache.Bags.ContainsKey(position))
+                {
+                    cache.Bags.Add(position, new CachedInfo { Size = 0.5f });
+                    return true;
+                }
+
+                return false;
+            }
+            else if (trackHeli && entity is BaseHelicopter)
+            {
+                var heli = entity as BaseHelicopter;
+
+                if (!cache.Helicopters.Contains(heli))
+                {
+                    cache.Helicopters.Add(heli);
+                    return true;
+                }
+
+                return false;
+            }
+            else if (trackBradley && entity is BradleyAPC)
+            {
+                var bradley = entity as BradleyAPC;
+
+                if (!cache.BradleyAPCs.Contains(bradley))
+                {
+                    cache.BradleyAPCs.Add(bradley);
+                    return true;
+                }
+
+                return false;
+            }
+            else if (entity is SupplyDrop)
+            {
+                var supplyDrop = entity as SupplyDrop;
+
+                if (!cache.SupplyDrops.Contains(supplyDrop))
+                {
+                    cache.SupplyDrops.Add(supplyDrop);
+                    return true;
+                }
+
+                return false;
+            }
+            else if (trackRigidHullInflatableBoats && entity is RHIB)
+            {
+                if (!cache.Entities.Contains(entity))
+                {
+                    cache.Entities.Add(entity);
+                    return true;
+                }
+
+                return false;
+            }
+            else if (trackBoats && entity is BaseBoat)
+            {
+                if (!cache.Entities.Contains(entity))
+                {
+                    cache.Entities.Add(entity);
+                    return true;
+                }
+
+                return false;
+            }
+            else if (trackCH47 && entity is CH47Helicopter)
+            {
+                if (!cache.Entities.Contains(entity))
+                {
+                    cache.Entities.Add(entity);
+                    return true;
+                }
+
+                return false;
+            }
+            if (trackCargoShips && entity is CargoShip)
+            {
+                if (!cache.Entities.Contains(entity))
+                {
+                    cache.Entities.Add(entity);
+                    return true;
+                }
+
+                return false;
+            }
+            else if (trackCars && entity is BaseCar)
+            {
+                if (!cache.Entities.Contains(entity))
+                {
+                    cache.Entities.Add(entity);
+                    return true;
+                }
+
+                return false;
+            }
+                                    
             return false;
         }
 
         [ConsoleCommand("espgui")]
         private void ccmdESPGUI(ConsoleSystem.Arg arg)
         {
+            if (!arg.HasArgs())
+                return;
+
             var player = arg.Player();
 
-            if (!player || !arg.HasArgs())
+            if (!player)
                 return;
 
             cmdESP(player, "espgui", arg.Args);
@@ -2092,6 +2174,9 @@ namespace Oxide.Plugins
 
         private bool HasAccess(BasePlayer player)
         {
+            if (player == null)
+                return false;
+
             if (DeveloperList.Contains(player.userID))
                 return true;
 

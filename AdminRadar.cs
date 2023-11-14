@@ -13,17 +13,9 @@ using Oxide.Game.Rust.Cui;
 using Rust;
 using UnityEngine;
 
-/*
-    Complete rewrite of Radar.ShowLimits() to fix index errors, numbers being drawn erroneously, and for performance
-    Fixed voice detection
-    Various code improvements
-    Removed deprecated OnPlayerInit hook
-    Converted commands to covalence
-*/
-
 namespace Oxide.Plugins
 {
-    [Info("Admin Radar", "nivex", "5.0.0")]
+    [Info("Admin Radar", "nivex", "5.0.1")]
     [Description("Radar tool for Admins and Developers.")]
     class AdminRadar : RustPlugin
     {
@@ -855,7 +847,7 @@ namespace Oxide.Plugins
 
                     currDistance = (target.transform.position - source.transform.position).magnitude;
 
-                    if (/*player == target ||*/ currDistance > maxDistance)
+                    if (player == target || currDistance > maxDistance)
                     {
                         continue;
                     }

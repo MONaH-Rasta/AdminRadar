@@ -4,6 +4,7 @@ using System.Collections;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
+using System.Reflection;
 using System.Text;
 using System.Text.RegularExpressions;
 using Oxide.Core;
@@ -13,13 +14,37 @@ using Oxide.Game.Rust.Cui;
 using Rust;
 using UnityEngine;
 
+/*  
+    Radar now runs in its own coroutine as to not cause any server lag
+    
+        This should also resolve issues for those experiencing rare extreme delays while using radar
+
+    Removed DoESP message from language file as it's no longer used
+
+    Removed `Latency Cap In Milliseconds (0 = no cap)` as it's no longer needed
+
+    Removed `Objects Drawn Limit (0 = unlimited)` as it depends entirely on the users PC
+
+    Removed support for converting old language messages to new hex values - delete your language file if you have issues.
+
+    Changed how messages are sent to radar users to use Player.Message
+
+    Added CCTV filter and options to config (disabled by default)
+        Red = no power / off
+        Cyan = powered on with no viewers
+        Green = powered on with viewers
+        eg. CCTV 55 2 - where 55 is your distance from the CCTV, and 2 is the number of viewers
+*/
+
 namespace Oxide.Plugins
 {
-    [Info("Admin Radar", "nivex", "5.0.1")]
+    [Info("Admin Radar", "nivex", "5.0.2")]
     [Description("Radar tool for Admins and Developers.")]
     class AdminRadar : RustPlugin
     {
-        [PluginReference] private Plugin Vanish;
+        [PluginReference] Plugin Vanish;
+
+        private static readonly FieldInfo numViewers = typeof(CCTV_RC).GetField("numViewers", (BindingFlags.Public | BindingFlags.Static | BindingFlags.Instance | BindingFlags.NonPublic));
 
         private const string permAllowed = "adminradar.allowed";
         private const string permBypass = "adminradar.bypass";
@@ -58,28 +83,29 @@ namespace Oxide.Plugins
 
         private class Cache
         {
-            public readonly HashSet<BaseNpc> Animals = new HashSet<BaseNpc>();
-            public readonly HashSet<BaseEntity> CargoPlanes = new HashSet<BaseEntity>();
-            public readonly HashSet<DroppedItemContainer> Backpacks = new HashSet<DroppedItemContainer>();
+            public readonly List<BaseNpc> Animals = new List<BaseNpc>();
+            public readonly List<BaseEntity> CargoPlanes = new List<BaseEntity>();
+            public readonly List<DroppedItemContainer> Backpacks = new List<DroppedItemContainer>();
             public readonly Dictionary<Vector3, CachedInfo> Bags = new Dictionary<Vector3, CachedInfo>();
-            public readonly HashSet<BaseEntity> Boats = new HashSet<BaseEntity>();
-            public readonly HashSet<BradleyAPC> BradleyAPCs = new HashSet<BradleyAPC>();
-            public readonly HashSet<BaseEntity> CargoShips = new HashSet<BaseEntity>();
-            public readonly HashSet<BaseEntity> Cars = new HashSet<BaseEntity>();
-            public readonly HashSet<BaseEntity> CH47 = new HashSet<BaseEntity>();
-            public readonly HashSet<BuildingPrivlidge> Cupboards = new HashSet<BuildingPrivlidge>();
+            public readonly List<BaseEntity> Boats = new List<BaseEntity>();
+            public readonly List<BradleyAPC> BradleyAPCs = new List<BradleyAPC>();
+            public readonly List<BaseEntity> CargoShips = new List<BaseEntity>();
+            public readonly List<BaseEntity> Cars = new List<BaseEntity>();
+            public readonly List<CCTV_RC> CCTV = new List<CCTV_RC>();
+            public readonly List<BaseEntity> CH47 = new List<BaseEntity>();
+            public readonly List<BuildingPrivlidge> Cupboards = new List<BuildingPrivlidge>();
             public readonly Dictionary<Vector3, CachedInfo> Collectibles = new Dictionary<Vector3, CachedInfo>();
-            public readonly HashSet<StorageContainer> Containers = new HashSet<StorageContainer>();
+            public readonly List<StorageContainer> Containers = new List<StorageContainer>();
             public readonly Dictionary<PlayerCorpse, CachedInfo> Corpses = new Dictionary<PlayerCorpse, CachedInfo>();
-            public readonly HashSet<BaseHelicopter> Helicopters = new HashSet<BaseHelicopter>();
-            public readonly HashSet<BaseEntity> MiniCopter = new HashSet<BaseEntity>();
-            public readonly HashSet<BasePlayer> NPCPlayers = new HashSet<BasePlayer>();
+            public readonly List<BaseHelicopter> Helicopters = new List<BaseHelicopter>();
+            public readonly List<BaseEntity> MiniCopter = new List<BaseEntity>();
+            public readonly List<BasePlayer> NPCPlayers = new List<BasePlayer>();
             public readonly Dictionary<Vector3, CachedInfo> Ores = new Dictionary<Vector3, CachedInfo>();
-            public readonly HashSet<BaseEntity> RHIB = new HashSet<BaseEntity>();
-            public readonly HashSet<BaseEntity> RidableHorse = new HashSet<BaseEntity>();
-            public readonly HashSet<SupplyDrop> SupplyDrops = new HashSet<SupplyDrop>();
-            public readonly HashSet<AutoTurret> Turrets = new HashSet<AutoTurret>();
-            public readonly HashSet<Zombie> Zombies = new HashSet<Zombie>();
+            public readonly List<BaseEntity> RHIB = new List<BaseEntity>();
+            public readonly List<BaseEntity> RidableHorse = new List<BaseEntity>();
+            public readonly List<SupplyDrop> SupplyDrops = new List<SupplyDrop>();
+            public readonly List<AutoTurret> Turrets = new List<AutoTurret>();
+            public readonly List<Zombie> Zombies = new List<Zombie>();
         }
 
         private class StoredData
@@ -111,6 +137,7 @@ namespace Oxide.Plugins
             Cars,
             CargoPlanes,
             CargoShips,
+            CCTV,
             CH47Helicopters,
             Containers,
             Collectibles,
@@ -130,30 +157,36 @@ namespace Oxide.Plugins
             Zombies
         }
 
+        public static class Coroutines // Credits to Jake Rich
+        {
+            private static Dictionary<float, YieldInstruction> _waitForSecondDict = new Dictionary<float, YieldInstruction>();
+
+            public static YieldInstruction WaitForSeconds(float delay)
+            {
+                YieldInstruction yield;
+                if (!_waitForSecondDict.TryGetValue(delay, out yield))
+                {
+                    //Cache the yield instruction for later
+                    yield = new WaitForSeconds(delay);
+                    _waitForSecondDict.Add(delay, yield);
+                }
+
+                return yield;
+            }
+        }
+
         private class Radar : FacepunchBehaviour
         {
-            WaitForSecondsRealtime _cachedWaitForSecondsRealtime;
             private int drawnObjects;
             private EntityType entityType;
             private int _inactiveSeconds;
             private int activeSeconds;
-            private float _invokeTime;
-            public float invokeTime
-            {
-                get
-                {
-                    return _invokeTime;
-                }
-                set
-                {
-                    _cachedWaitForSecondsRealtime = new WaitForSecondsRealtime(value);
-                    _invokeTime = value;
-                }
-            }
+            public float invokeTime { get; set; }
             public float maxDistance;
             public BasePlayer player;
             private Vector3 position;
             private float currDistance;
+            private int checks;
 
             private bool setSource = True;
             public bool showBags;
@@ -161,6 +194,7 @@ namespace Oxide.Plugins
             public bool showBox;
             public bool showBradley;
             public bool showCars;
+            public bool showCCTV;
             public bool showCargoPlanes;
             public bool showCargoShips;
             public bool showCH47;
@@ -181,7 +215,6 @@ namespace Oxide.Plugins
             public bool showTurrets;
             public bool showAll;
             private BaseEntity source;
-            private DateTime tick;
             private StringBuilder _cachedStringBuilder = new StringBuilder();
 
             private class Ping
@@ -232,16 +265,20 @@ namespace Oxide.Plugins
                 }
             }
 
-            public void Start()
+            public void StopAll()
             {
-                CancelInvoke(DoRadar);
-                Invoke(DoRadar, invokeTime);
-                InvokeRepeating(DoRadar, 0f, invokeTime);
+                if (_routine != null)
+                {
+                    StopCoroutine(_routine);
+                    _routine = null;
+                }
+
+                CancelInvoke();
             }
 
             private void OnDestroy()
             {
-                StopAllCoroutines();
+                StopAll();
                 nearbyPlayers.Clear();
                 groupedPlayers.Clear();
                 distantPlayers.Clear();
@@ -251,10 +288,6 @@ namespace Oxide.Plugins
                 if (radarUI.Contains(player.UserIDString))
                     ins.DestroyUI(player);
 
-                if (inactiveSeconds > 0 || inactiveMinutes > 0)
-                    CancelInvoke(Activity);
-
-                CancelInvoke(DoRadar);
                 activeRadars.Remove(this);
 
                 if (activeRadars.Count == 0 && !isUnloading) ins.Unsubscribe(nameof(OnEntityTakeDamage));
@@ -268,7 +301,7 @@ namespace Oxide.Plugins
                         else cooldowns[player.userID] = Time.realtimeSinceStartup + coolDown;
                     }
 
-                    player.ChatMessage(ins.msg("Deactivated", player.UserIDString));
+                    Message(player, ins.msg("Deactivated", player.UserIDString));
                 }
 
                 Destroy(this);
@@ -294,6 +327,8 @@ namespace Oxide.Plugins
                         return showCargoShips;
                     case "Cars":
                         return showCars;
+                    case "CCTV":
+                        return showCCTV;
                     case "CH47":
                         return showCH47;
                     case "Collectibles":
@@ -329,22 +364,6 @@ namespace Oxide.Plugins
                 }
             }
 
-            private bool LatencyAccepted()
-            {
-                if (latencyMs > 0)
-                {
-                    double ms = (DateTime.Now - tick).TotalMilliseconds;
-
-                    if (ms > latencyMs)
-                    {
-                        player.ChatMessage(ins.msg("DoESP", player.UserIDString, ms, latencyMs));
-                        return False;
-                    }
-                }
-
-                return True;
-            }
-
             private void Activity()
             {
                 if (source != player)
@@ -364,28 +383,29 @@ namespace Oxide.Plugins
 
             Coroutine _routine;
 
-            void StartRoutine()
+            public void Start()
             {
+                isAdmin = player.IsAdmin;
+
+                if (_routine != null)
+                {
+                    ServerMgr.Instance.StopCoroutine(_routine);
+                    _routine = null;
+                }
+
                 _routine = ServerMgr.Instance.StartCoroutine(DoRadarRoutine());
             }
 
+            bool isAdmin;
+
             IEnumerator DoRadarRoutine()
             {
-
-                yield return _cachedWaitForSecondsRealtime;
-            }
-
-            private void DoRadar()
-            {
-                tick = DateTime.Now;
-                bool isAdmin = player.IsAdmin;
-
-                try
+                do
                 {
-                    if (!player.IsConnected)
+                    if (!player || !player.IsConnected)
                     {
                         Destroy(this);
-                        return;
+                        yield break;
                     }
 
                     drawnObjects = 0;
@@ -397,298 +417,377 @@ namespace Oxide.Plugins
                     }
 
                     if (!SetSource())
-                        return;
-
-                    if (!ShowActive())
-                        return;
-
-                    if (!ShowSleepers())
-                        return;
-
-                    if (barebonesMode)
-                        return;
-
-                    if (!ShowEntity(EntityType.Cars, showCars, "C", cache.Cars))
-                        return;
-
-                    if (!ShowEntity(EntityType.CargoPlanes, showCargoPlanes, "CP", cache.CargoPlanes))
-                        return;
-
-                    if (!ShowEntity(EntityType.CargoShips, showCargoShips, "CS", cache.CargoShips))
-                        return;
-
-                    if (!ShowHeli())
-                        return;
-
-                    if (!ShowBradley())
-                        return;
-
-                    if (!ShowLimits())
-                        return;
-
-                    if (!ShowTC())
-                        return;
-
-                    if (!ShowContainers())
-                        return;
-
-                    if (!ShowBags())
-                        return;
-
-                    if (!ShowTurrets())
-                        return;
-
-                    if (!ShowDead())
-                        return;
-
-                    if (!ShowNPC())
-                        return;
-
-                    if (!ShowOre())
-                        return;
-
-                    if (!ShowEntity(EntityType.CH47Helicopters, showCH47, "CH47", cache.CH47))
-                        return;
-
-                    if (!ShowEntity(EntityType.RigidHullInflatableBoats, showRHIB, "RHIB", cache.RHIB))
-                        return;
-
-                    if (!ShowEntity(EntityType.Boats, showBoats, "RB", cache.Boats))
-                        return;
-
-                    if (!ShowEntity(EntityType.MiniCopter, showMiniCopter, "MC", cache.MiniCopter))
-                        return;
-
-                    if (!ShowEntity(EntityType.RidableHorses, showRidableHorses, "RH", cache.RidableHorse))
-                        return;
-
-                    ShowCollectables();
-                }
-                catch (Exception ex)
-                {
-                    ins.Puts("Error @{0}: {1} --- {2}", Enum.GetName(typeof(EntityType), entityType), ex.Message, ex.StackTrace);
-                    player.ChatMessage(ins.msg("Exception", player.UserIDString));
-
-                    switch (entityType)
                     {
-                        case EntityType.Active:
-                            {
-                                trackActive = False;
-                            }
-                            break;
-                        case EntityType.Airdrops:
-                            {
-                                trackSupplyDrops = False;
-                                cache.SupplyDrops.Clear();
-                            }
-                            break;
-                        case EntityType.Animals:
-                        case EntityType.Npc:
-                        case EntityType.Zombies:
-                            {
-                                trackNPC = False;
-                                showNPC = False;
-                                uiBtnNPC = False;
-                                cache.Animals.Clear();
-                                cache.Zombies.Clear();
-                                cache.NPCPlayers.Clear();
-                            }
-                            break;
-                        case EntityType.Bags:
-                            {
-                                trackBags = False;
-                                showBags = False;
-                                uiBtnBags = False;
-                                cache.Bags.Clear();
-                            }
-                            break;
-                        case EntityType.Backpacks:
-                            {
-                                trackLoot = False;
-                                showLoot = False;
-                                uiBtnLoot = False;
-                                cache.Backpacks.Clear();
-                            }
-                            break;
-                        case EntityType.Bradley:
-                            {
-                                showBradley = False;
-                                uiBtnBradley = False;
-                                trackBradley = False;
-                                cache.BradleyAPCs.Clear();
-                            }
-                            break;
-                        case EntityType.Cars:
-                            {
-                                showCars = False;
-                                uiBtnCars = False;
-                                trackCars = False;
-                                cache.Cars.Clear();
-                            }
-                            break;
-                        case EntityType.CargoPlanes:
-                            {
-                                uiBtnCargoPlanes = False;
-                                trackCargoPlanes = False;
-                                showCargoPlanes = False;
-                                cache.CargoPlanes.Clear();
-                            }
-                            break;
-                        case EntityType.CargoShips:
-                            {
-                                trackCargoShips = False;
-                                showCargoShips = False;
-                                uiBtnCargoShips = False;
-                                cache.CargoShips.Clear();
-                            }
-                            break;
-                        case EntityType.CH47Helicopters:
-                            {
-                                showCH47 = False;
-                                uiBtnCH47 = False;
-                                trackCH47 = False;
-                                cache.CH47.Clear();
-                            }
-                            break;
-                        case EntityType.Containers:
-                            {
-                                showBox = False;
-                                showLoot = False;
-                                showStash = False;
-                                uiBtnBox = False;
-                                uiBtnLoot = False;
-                                uiBtnStash = False;
-                                trackBox = False;
-                                trackLoot = False;
-                                trackStash = False;
-                                cache.Containers.Clear();
-                            }
-                            break;
-                        case EntityType.Collectibles:
-                            {
-                                trackCollectibles = False;
-                                showCollectible = False;
-                                uiBtnCollectible = False;
-                                cache.Collectibles.Clear();
-                            }
-                            break;
-                        case EntityType.Cupboards:
-                            {
-                                trackTC = False;
-                                showTC = False;
-                                uiBtnTC = False;
-                                cache.Cupboards.Clear();
-                            }
-                            break;
-                        case EntityType.CupboardsArrow:
-                            {
-                                showTCArrow = False;
-                                uiBtnTCArrow = False;
-                            }
-                            break;
-                        case EntityType.Dead:
-                            {
-                                trackDead = False;
-                                showDead = False;
-                                uiBtnDead = False;
-                                cache.Corpses.Clear();
-                            }
-                            break;
-                        case EntityType.GroupLimit:
-                            {
-                                drawX = False;
-                            }
-                            break;
-                        case EntityType.Heli:
-                            {
-                                showHeli = False;
-                                uiBtnHeli = False;
-                                trackHeli = False;
-                                cache.Helicopters.Clear();
-                            }
-                            break;
-                        case EntityType.MiniCopter:
-                            {
-                                showMiniCopter = False;
-                                uiBtnMiniCopter = False;
-                                trackMiniCopter = False;
-                                cache.MiniCopter.Clear();
-                            }
-                            break;
-                        case EntityType.Ore:
-                            {
-                                trackOre = False;
-                                showOre = False;
-                                uiBtnOre = False;
-                                cache.Ores.Clear();
-                            }
-                            break;
-                        case EntityType.RidableHorses:
-                            {
-                                showRidableHorses = False;
-                                uiBtnRidableHorses = False;
-                                trackRidableHorses = False;
-                                cache.RidableHorse.Clear();
-                            }
-                            break;
-                        case EntityType.RigidHullInflatableBoats:
-                            {
-                                showRHIB = False;
-                                uiBtnRHIB = False;
-                                trackRigidHullInflatableBoats = False;
-                                cache.RHIB.Clear();
-                            }
-                            break;
-                        case EntityType.Boats:
-                            {
-                                showBoats = False;
-                                uiBtnBoats = False;
-                                trackBoats = False;
-                                cache.Boats.Clear();
-                            }
-                            break;
-                        case EntityType.Sleepers:
-                            {
-                                trackSleepers = False;
-                                showSleepers = False;
-                                uiBtnSleepers = False;
-                            }
-                            break;
-                        case EntityType.Source:
-                            {
-                                setSource = False;
-                            }
-                            break;
-                        case EntityType.Turrets:
-                            {
-                                trackTurrets = False;
-                                showTurrets = False;
-                                uiBtnTurrets = False;
-                                cache.Turrets.Clear();
-                            }
-                            break;
+                        yield return Coroutines.WaitForSeconds(0.1f);
+                        continue;
                     }
 
-                    uiBtnNames = new string[0];
-                    uiButtons = null;
-                }
-                finally
-                {
+                    if (ShowActive() >= 300)
+                    {
+                        checks = 0;
+                        yield return null;
+                    }
+
+                    if (ShowSleepers() >= 300)
+                    {
+                        checks = 0;
+                        yield return null;
+                    }
+
+                    if (barebonesMode)
+                    {
+                        checks = 0;
+                        continue;
+                    }
+
+                    if (ShowEntity(EntityType.Cars, showCars, "C", cache.Cars) >= 300)
+                    {
+                        checks = 0;
+                        yield return null;
+                    }
+
+                    if (ShowEntity(EntityType.CargoPlanes, showCargoPlanes, "CP", cache.CargoPlanes) >= 300)
+                    {
+                        checks = 0;
+                        yield return null;
+                    }
+
+                    if (ShowEntity(EntityType.CargoShips, showCargoShips, "CS", cache.CargoShips) >= 300)
+                    {
+                        checks = 0;
+                        yield return null;
+                    }
+
+                    if (ShowHeli() >= 300)
+                    {
+                        checks = 0;
+                        yield return null;
+                    }
+
+                    if (ShowBradley() >= 300)
+                    {
+                        checks = 0;
+                        yield return null;
+                    }
+
+                    if (ShowLimits() >= 300)
+                    {
+                        checks = 0;
+                        yield return null;
+                    }
+
+                    if (ShowTC() >= 300)
+                    {
+                        checks = 0;
+                        yield return null;
+                    }
+
+                    if (ShowContainers() >= 300)
+                    {
+                        checks = 0;
+                        yield return null;
+                    }
+
+                    if (ShowBags() >= 300)
+                    {
+                        checks = 0;
+                        yield return null;
+                    }
+
+                    if (ShowTurrets() >= 300)
+                    {
+                        checks = 0;
+                        yield return null;
+                    }
+
+                    if (ShowDead() >= 300)
+                    {
+                        checks = 0;
+                        yield return null;
+                    }
+
+                    if (ShowNPC() >= 300)
+                    {
+                        checks = 0;
+                        yield return null;
+                    }
+
+                    if (ShowOre() >= 300)
+                    {
+                        checks = 0;
+                        yield return null;
+                    }
+
+                    if (ShowCCTV() >= 300)
+                    {
+                        checks = 0;
+                        yield return null;
+                    }
+
+                    if (ShowEntity(EntityType.CH47Helicopters, showCH47, "CH47", cache.CH47) >= 300)
+                    {
+                        checks = 0;
+                        yield return null;
+                    }
+
+                    if (ShowEntity(EntityType.RigidHullInflatableBoats, showRHIB, "RHIB", cache.RHIB) >= 300)
+                    {
+                        checks = 0;
+                        yield return null;
+                    }
+
+                    if (ShowEntity(EntityType.Boats, showBoats, "RB", cache.Boats) >= 300)
+                    {
+                        checks = 0;
+                        yield return null;
+                    }
+
+                    if (ShowEntity(EntityType.MiniCopter, showMiniCopter, "MC", cache.MiniCopter) >= 300)
+                    {
+                        checks = 0;
+                        yield return null;
+                    }
+
+                    if (ShowEntity(EntityType.RidableHorses, showRidableHorses, "RH", cache.RidableHorse) >= 300)
+                    {
+                        checks = 0;
+                        yield return null;
+                    }
+
+                    ShowCollectables();
+
                     if (!isAdmin && player.HasPlayerFlag(BasePlayer.PlayerFlags.IsAdmin))
                     {
                         player.SetPlayerFlag(BasePlayer.PlayerFlags.IsAdmin, False);
                         player.SendNetworkUpdateImmediate();
                     }
 
-                    if (!LatencyAccepted())
-                    {
-                        double ms = (DateTime.Now - tick).TotalMilliseconds;
-                        string message = ins.msg("DoESP", player.UserIDString, ms, latencyMs);
-                        ins.Puts("{0} for {1} ({2})", message, player.displayName, player.UserIDString);
-                        enabled = false;
-                        Destroy(this);
-                    }
+                    checks = 0;
+                    yield return Coroutines.WaitForSeconds(invokeTime);
+                } while (player.IsValid() && player.IsConnected);
+            }
+
+            private void HandleException(Exception ex)
+            {
+                if (!isAdmin && player.HasPlayerFlag(BasePlayer.PlayerFlags.IsAdmin))
+                {
+                    player.SetPlayerFlag(BasePlayer.PlayerFlags.IsAdmin, False);
+                    player.SendNetworkUpdateImmediate();
                 }
+
+                ins.Puts("Error @{0}: {1} --- {2}", Enum.GetName(typeof(EntityType), entityType), ex.Message, ex.StackTrace);
+                Message(player, ins.msg("Exception", player.UserIDString));
+
+                switch (entityType)
+                {
+                    case EntityType.Active:
+                        {
+                            trackActive = False;
+                        }
+                        break;
+                    case EntityType.Airdrops:
+                        {
+                            trackSupplyDrops = False;
+                            cache.SupplyDrops.Clear();
+                        }
+                        break;
+                    case EntityType.Animals:
+                    case EntityType.Npc:
+                    case EntityType.Zombies:
+                        {
+                            trackNPC = False;
+                            showNPC = False;
+                            uiBtnNPC = False;
+                            cache.Animals.Clear();
+                            cache.Zombies.Clear();
+                            cache.NPCPlayers.Clear();
+                        }
+                        break;
+                    case EntityType.Bags:
+                        {
+                            trackBags = False;
+                            showBags = False;
+                            uiBtnBags = False;
+                            cache.Bags.Clear();
+                        }
+                        break;
+                    case EntityType.Backpacks:
+                        {
+                            trackLoot = False;
+                            showLoot = False;
+                            uiBtnLoot = False;
+                            cache.Backpacks.Clear();
+                        }
+                        break;
+                    case EntityType.Bradley:
+                        {
+                            showBradley = False;
+                            uiBtnBradley = False;
+                            trackBradley = False;
+                            cache.BradleyAPCs.Clear();
+                        }
+                        break;
+                    case EntityType.Cars:
+                        {
+                            showCars = False;
+                            uiBtnCars = False;
+                            trackCars = False;
+                            cache.Cars.Clear();
+                        }
+                        break;
+                    case EntityType.CargoPlanes:
+                        {
+                            uiBtnCargoPlanes = False;
+                            trackCargoPlanes = False;
+                            showCargoPlanes = False;
+                            cache.CargoPlanes.Clear();
+                        }
+                        break;
+                    case EntityType.CargoShips:
+                        {
+                            trackCargoShips = False;
+                            showCargoShips = False;
+                            uiBtnCargoShips = False;
+                            cache.CargoShips.Clear();
+                        }
+                        break;
+                    case EntityType.CCTV:
+                        {
+                            trackCCTV = False;
+                            showCCTV = False;
+                            uiBtnCCTV = False;
+                            cache.CCTV.Clear();
+                        }
+                        break;
+                    case EntityType.CH47Helicopters:
+                        {
+                            showCH47 = False;
+                            uiBtnCH47 = False;
+                            trackCH47 = False;
+                            cache.CH47.Clear();
+                        }
+                        break;
+                    case EntityType.Containers:
+                        {
+                            showBox = False;
+                            showLoot = False;
+                            showStash = False;
+                            uiBtnBox = False;
+                            uiBtnLoot = False;
+                            uiBtnStash = False;
+                            trackBox = False;
+                            trackLoot = False;
+                            trackStash = False;
+                            cache.Containers.Clear();
+                        }
+                        break;
+                    case EntityType.Collectibles:
+                        {
+                            trackCollectibles = False;
+                            showCollectible = False;
+                            uiBtnCollectible = False;
+                            cache.Collectibles.Clear();
+                        }
+                        break;
+                    case EntityType.Cupboards:
+                        {
+                            trackTC = False;
+                            showTC = False;
+                            uiBtnTC = False;
+                            cache.Cupboards.Clear();
+                        }
+                        break;
+                    case EntityType.CupboardsArrow:
+                        {
+                            showTCArrow = False;
+                            uiBtnTCArrow = False;
+                        }
+                        break;
+                    case EntityType.Dead:
+                        {
+                            trackDead = False;
+                            showDead = False;
+                            uiBtnDead = False;
+                            cache.Corpses.Clear();
+                        }
+                        break;
+                    case EntityType.GroupLimit:
+                        {
+                            drawX = False;
+                        }
+                        break;
+                    case EntityType.Heli:
+                        {
+                            showHeli = False;
+                            uiBtnHeli = False;
+                            trackHeli = False;
+                            cache.Helicopters.Clear();
+                        }
+                        break;
+                    case EntityType.MiniCopter:
+                        {
+                            showMiniCopter = False;
+                            uiBtnMiniCopter = False;
+                            trackMiniCopter = False;
+                            cache.MiniCopter.Clear();
+                        }
+                        break;
+                    case EntityType.Ore:
+                        {
+                            trackOre = False;
+                            showOre = False;
+                            uiBtnOre = False;
+                            cache.Ores.Clear();
+                        }
+                        break;
+                    case EntityType.RidableHorses:
+                        {
+                            showRidableHorses = False;
+                            uiBtnRidableHorses = False;
+                            trackRidableHorses = False;
+                            cache.RidableHorse.Clear();
+                        }
+                        break;
+                    case EntityType.RigidHullInflatableBoats:
+                        {
+                            showRHIB = False;
+                            uiBtnRHIB = False;
+                            trackRigidHullInflatableBoats = False;
+                            cache.RHIB.Clear();
+                        }
+                        break;
+                    case EntityType.Boats:
+                        {
+                            showBoats = False;
+                            uiBtnBoats = False;
+                            trackBoats = False;
+                            cache.Boats.Clear();
+                        }
+                        break;
+                    case EntityType.Sleepers:
+                        {
+                            trackSleepers = False;
+                            showSleepers = False;
+                            uiBtnSleepers = False;
+                        }
+                        break;
+                    case EntityType.Source:
+                        {
+                            setSource = False;
+                        }
+                        break;
+                    case EntityType.Turrets:
+                        {
+                            trackTurrets = False;
+                            showTurrets = False;
+                            uiBtnTurrets = False;
+                            cache.Turrets.Clear();
+                        }
+                        break;
+                }
+
+                uiBtnNames = new string[0];
+                uiButtons = null;
             }
 
             private Vector3 GetNearestCupboard(BasePlayer target)
@@ -830,718 +929,859 @@ namespace Oxide.Plugins
                 if (drawBox || @override) player.SendConsoleCommand("ddraw.box", invokeTime + flickerDelay, color, position, size);
             }
 
-            private bool ShowActive()
+            private int ShowActive()
             {
                 if (!trackActive)
-                    return True;
+                    return checks;
 
                 entityType = EntityType.Active;
                 Color color;
 
-                foreach (var target in BasePlayer.activePlayerList)
+                try
                 {
-                    if (target == null || target.transform == null || !target.IsConnected)
+                    foreach (var target in BasePlayer.activePlayerList)
                     {
-                        continue;
-                    }
-
-                    currDistance = (target.transform.position - source.transform.position).magnitude;
-
-                    if (player == target || currDistance > maxDistance)
-                    {
-                        continue;
-                    }
-
-                    if (ins.permission.UserHasPermission(target.UserIDString, permBypass) && !ins.permission.UserHasPermission(player.UserIDString, permBypassOverride))
-                    {
-                        continue;
-                    }
-
-                    color = __(target.IsAlive() ? activeCC : activeDeadCC);
-
-                    if (currDistance < playerDistance)
-                    {
-                        _cachedStringBuilder.Clear();
-
-                        if (ins.storedData.Extended.Contains(player.UserIDString) && target.GetActiveItem() != null)
+                        if (target == null || target.transform == null || !target.IsConnected)
                         {
-                            _cachedStringBuilder.Append(target.GetActiveItem().info.displayName.translated);
-                            var itemList = target.GetActiveItem().contents?.itemList;
+                            continue;
+                        }
 
-                            if (itemList?.Count > 0)
+                        currDistance = (target.transform.position - source.transform.position).magnitude;
+
+                        if (player == target || currDistance > maxDistance)
+                        {
+                            continue;
+                        }
+
+                        if (ins.permission.UserHasPermission(target.UserIDString, permBypass) && !ins.permission.UserHasPermission(player.UserIDString, permBypassOverride))
+                        {
+                            continue;
+                        }
+
+                        color = __(target.IsAlive() ? activeCC : activeDeadCC);
+
+                        if (currDistance < playerDistance)
+                        {
+                            _cachedStringBuilder.Clear();
+
+                            if (ins.storedData.Extended.Contains(player.UserIDString) && target.GetActiveItem() != null)
                             {
-                                _cachedStringBuilder.Append(" (");
+                                _cachedStringBuilder.Append(target.GetActiveItem().info.displayName.translated);
+                                var itemList = target.GetActiveItem().contents?.itemList;
 
-                                for (int index = 0; index < itemList.Count; index++)
+                                if (itemList?.Count > 0)
                                 {
-                                    _cachedStringBuilder.Append(itemList[index].info.displayName.translated).Append("|");
+                                    _cachedStringBuilder.Append(" (");
+
+                                    for (int index = 0; index < itemList.Count; index++)
+                                    {
+                                        _cachedStringBuilder.Append(itemList[index].info.displayName.translated).Append("|");
+                                    }
+
+                                    _cachedStringBuilder.Replace("Weapon ", "");
+                                    _cachedStringBuilder.Replace("Simple Handmade ", "");
+                                    _cachedStringBuilder.Replace("Muzzle ", "");
+                                    _cachedStringBuilder.Replace("4x Zoom Scope", "4x");
+                                    _cachedStringBuilder.Append(")");
                                 }
-
-                                _cachedStringBuilder.Replace("Weapon ", "");
-                                _cachedStringBuilder.Replace("Simple Handmade ", "");
-                                _cachedStringBuilder.Replace("Muzzle ", "");
-                                _cachedStringBuilder.Replace("4x Zoom Scope", "4x");
-                                _cachedStringBuilder.Append(")");
                             }
-                        }
 
-                        string vanished = ins.Vanish != null && ins.Vanish.Call<bool>("IsInvisible", target) ? "<color=#FF00FF>V</color>" : string.Empty;
-                        string health = showHT && target.metabolism != null ? string.Format("{0} <color=#FFA500>{1}</color>:<color=#FFADD8E6>{2}</color>", Math.Floor(target.health), target.metabolism.calories.value.ToString("#0"), target.metabolism.hydration.value.ToString("#0")) : Math.Floor(target.health).ToString("#0");
+                            string vanished = ins.Vanish != null && ins.Vanish.Call<bool>("IsInvisible", target) ? "<color=#FF00FF>V</color>" : string.Empty;
+                            string health = showHT && target.metabolism != null ? string.Format("{0} <color=#FFA500>{1}</color>:<color=#FFADD8E6>{2}</color>", Math.Floor(target.health), target.metabolism.calories.value.ToString("#0"), target.metabolism.hydration.value.ToString("#0")) : Math.Floor(target.health).ToString("#0");
 
-                        if (averagePingInterval > 0) _cachedStringBuilder.Append(" ").Append(GetAveragePing(target)).Append("ms");
-                        if (ins.storedData.Visions.Contains(player.UserIDString)) DrawVision(target);
-                        DrawArrow(__(colorDrawArrows), target.transform.position + new Vector3(0f, target.transform.position.y + 10), target.transform.position, 1, false);
-                        DrawText(color, target.transform.position + new Vector3(0f, 2f, 0f), string.Format("{0} <color={1}>{2}</color> <color={3}>{4}</color>{5} {6}", ins.RemoveFormatting(target.displayName) ?? target.userID.ToString(), healthCC, health, distCC, currDistance.ToString("0"), vanished, _cachedStringBuilder.ToString()));
-                        DrawBox(color, target.transform.position + new Vector3(0f, 1f, 0f), target.GetHeight(target.modelState.ducked));
-                        if (ins.voices.ContainsKey(target.userID) && (target.transform.position - player.transform.position).magnitude <= voiceDistance)
-                        {
-                            DrawArrow(Color.yellow, target.transform.position + new Vector3(0f, 5f, 0f), target.transform.position + new Vector3(0f, 2.5f, 0f), 0.5f, true);
+                            if (averagePingInterval > 0) _cachedStringBuilder.Append(" ").Append(GetAveragePing(target)).Append("ms");
+                            if (ins.storedData.Visions.Contains(player.UserIDString)) DrawVision(target);
+                            DrawArrow(__(colorDrawArrows), target.transform.position + new Vector3(0f, target.transform.position.y + 10), target.transform.position, 1, false);
+                            DrawText(color, target.transform.position + new Vector3(0f, 2f, 0f), string.Format("{0} <color={1}>{2}</color> <color={3}>{4}</color>{5} {6}", ins.RemoveFormatting(target.displayName) ?? target.userID.ToString(), healthCC, health, distCC, currDistance.ToString("0"), vanished, _cachedStringBuilder.ToString()));
+                            DrawBox(color, target.transform.position + new Vector3(0f, 1f, 0f), target.GetHeight(target.modelState.ducked));
+                            if (ins.voices.ContainsKey(target.userID) && (target.transform.position - player.transform.position).magnitude <= voiceDistance)
+                            {
+                                DrawArrow(Color.yellow, target.transform.position + new Vector3(0f, 5f, 0f), target.transform.position + new Vector3(0f, 2.5f, 0f), 0.5f, true);
+                            }
+                            ShowCupboardArrows(target, EntityType.Active);
                         }
-                        ShowCupboardArrows(target, EntityType.Active);
+                        else if (drawX)
+                            distantPlayers.Add(target);
+                        else
+                            DrawBox(color, target.transform.position + new Vector3(0f, 1f, 0f), 5f, true);
+
+                        checks++;
                     }
-                    else if (drawX)
-                        distantPlayers.Add(target);
-                    else
-                        DrawBox(color, target.transform.position + new Vector3(0f, 1f, 0f), 5f, true);
-
-                    if (objectsLimit > 0 && ++drawnObjects > objectsLimit)
-                        return False;
+                }
+                catch (Exception ex)
+                {
+                    HandleException(ex);
                 }
 
-                return LatencyAccepted();
+                return checks;
             }
 
-            private bool ShowSleepers()
+            private int ShowSleepers()
             {
                 if (!showSleepers || !trackSleepers)
-                    return True;
+                    return checks;
 
                 entityType = EntityType.Sleepers;
                 Color color;
 
-                foreach (var sleeper in BasePlayer.sleepingPlayerList)
+                try
                 {
-                    if (sleeper == null || sleeper.transform == null)
-                        continue;
-
-                    currDistance = (sleeper.transform.position - source.transform.position).magnitude;
-
-                    if (currDistance > maxDistance)
-                        continue;
-
-                    if (currDistance < playerDistance)
+                    foreach (var sleeper in BasePlayer.sleepingPlayerList)
                     {
-                        string health = showHT && sleeper.metabolism != null ? string.Format("{0} <color=#FFA500>{1}</color>:<color=#FFADD8E6>{2}</color>", Math.Floor(sleeper.health), sleeper.metabolism.calories.value.ToString("#0"), sleeper.metabolism.hydration.value.ToString("#0")) : Math.Floor(sleeper.health).ToString("#0");
-                        color = __(sleeper.IsAlive() ? sleeperCC : sleeperDeadCC);
+                        if (sleeper == null || sleeper.transform == null)
+                            continue;
 
-                        DrawArrow(__(colorDrawArrows), sleeper.transform.position + new Vector3(0f, sleeper.transform.position.y + 10), sleeper.transform.position, 1, false);
-                        DrawText(color, sleeper.transform.position, string.Format("{0} <color={1}>{2}</color> <color={3}>{4}</color>", ins.RemoveFormatting(sleeper.displayName) ?? sleeper.userID.ToString(), healthCC, health, distCC, currDistance.ToString("0")));
-                        DrawText(color, sleeper.transform.position + new Vector3(0f, 1f, 0f), "X", drawX);
-                        if (!drawX && drawBox) DrawBox(color, sleeper.transform.position, GetScale(currDistance));
-                        ShowCupboardArrows(sleeper, EntityType.Sleepers);
+                        currDistance = (sleeper.transform.position - source.transform.position).magnitude;
+
+                        if (currDistance > maxDistance)
+                            continue;
+
+                        if (currDistance < playerDistance)
+                        {
+                            string health = showHT && sleeper.metabolism != null ? string.Format("{0} <color=#FFA500>{1}</color>:<color=#FFADD8E6>{2}</color>", Math.Floor(sleeper.health), sleeper.metabolism.calories.value.ToString("#0"), sleeper.metabolism.hydration.value.ToString("#0")) : Math.Floor(sleeper.health).ToString("#0");
+                            color = __(sleeper.IsAlive() ? sleeperCC : sleeperDeadCC);
+
+                            DrawArrow(__(colorDrawArrows), sleeper.transform.position + new Vector3(0f, sleeper.transform.position.y + 10), sleeper.transform.position, 1, false);
+                            DrawText(color, sleeper.transform.position, string.Format("{0} <color={1}>{2}</color> <color={3}>{4}</color>", ins.RemoveFormatting(sleeper.displayName) ?? sleeper.userID.ToString(), healthCC, health, distCC, currDistance.ToString("0")));
+                            DrawText(color, sleeper.transform.position + new Vector3(0f, 1f, 0f), "X", drawX);
+                            if (!drawX && drawBox) DrawBox(color, sleeper.transform.position, GetScale(currDistance));
+                            ShowCupboardArrows(sleeper, EntityType.Sleepers);
+                        }
+                        else DrawBox(Color.cyan, sleeper.transform.position + new Vector3(0f, 1f, 0f), 5f, true);
+
+                        checks++;
                     }
-                    else DrawBox(Color.cyan, sleeper.transform.position + new Vector3(0f, 1f, 0f), 5f, true);
-
-                    if (objectsLimit > 0 && ++drawnObjects > objectsLimit) return False;
+                }
+                catch (Exception ex)
+                {
+                    HandleException(ex);
                 }
 
-                return LatencyAccepted();
+                return checks;
             }
 
             private void ShowCupboardArrows(BasePlayer target, EntityType lastType)
             {
-                if (!barebonesMode && showTCArrow && uiBtnTCArrow && uiBtnTC)
+                try
                 {
-                    entityType = EntityType.CupboardsArrow;
-                    var nearest = GetNearestCupboard(target);
-
-                    if (nearest != Vector3.zero)
+                    if (!barebonesMode && showTCArrow && uiBtnTCArrow && uiBtnTC)
                     {
-                        DrawArrow(__(tcCC), target.transform.position + new Vector3(0f, 0.115f, 0f), nearest, 0.25f, true);
-                    }
+                        entityType = EntityType.CupboardsArrow;
+                        var nearest = GetNearestCupboard(target);
 
-                    entityType = lastType;
+                        if (nearest != Vector3.zero)
+                        {
+                            DrawArrow(__(tcCC), target.transform.position + new Vector3(0f, 0.115f, 0f), nearest, 0.25f, true);
+                        }
+
+                        entityType = lastType;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    HandleException(ex);
                 }
             }
 
-            private bool ShowHeli()
+            private int ShowHeli()
             {
                 if (!showHeli || (!trackHeli && !uiBtnHeli))
-                    return True;
+                    return checks;
 
                 entityType = EntityType.Heli;
 
-                if (cache.Helicopters.Count > 0)
+                try
                 {
-                    foreach (var heli in cache.Helicopters)
+                    if (cache.Helicopters.Count > 0)
                     {
-                        if (heli == null || heli.transform == null || heli.IsDestroyed)
-                            continue;
+                        foreach (var heli in cache.Helicopters)
+                        {
+                            if (heli == null || heli.transform == null || heli.IsDestroyed)
+                                continue;
 
-                        currDistance = (heli.transform.position - source.transform.position).magnitude;
-                        string heliHealth = heli.health > 1000 ? Math.Floor(heli.health).ToString("#,##0,K", CultureInfo.InvariantCulture) : Math.Floor(heli.health).ToString("#0");
-                        string info = showHeliRotorHealth ? string.Format("<color={0}>{1}</color> (<color=#FFFF00>{2}</color>/<color=#FFFF00>{3}</color>)", healthCC, heliHealth, Math.Floor(heli.weakspots[0].health), Math.Floor(heli.weakspots[1].health)) : string.Format("<color={0}>{1}</color>", healthCC, heliHealth);
+                            currDistance = (heli.transform.position - source.transform.position).magnitude;
+                            string heliHealth = heli.health > 1000 ? Math.Floor(heli.health).ToString("#,##0,K", CultureInfo.InvariantCulture) : Math.Floor(heli.health).ToString("#0");
+                            string info = showHeliRotorHealth ? string.Format("<color={0}>{1}</color> (<color=#FFFF00>{2}</color>/<color=#FFFF00>{3}</color>)", healthCC, heliHealth, Math.Floor(heli.weakspots[0].health), Math.Floor(heli.weakspots[1].health)) : string.Format("<color={0}>{1}</color>", healthCC, heliHealth);
 
-                        DrawText(__(heliCC), heli.transform.position + new Vector3(0f, 2f, 0f), string.Format("H {0} <color={1}>{2}</color>", info, distCC, currDistance.ToString("0")));
-                        DrawBox(__(heliCC), heli.transform.position + new Vector3(0f, 1f, 0f), GetScale(currDistance));
-                        if (objectsLimit > 0 && ++drawnObjects > objectsLimit) return False;
+                            DrawText(__(heliCC), heli.transform.position + new Vector3(0f, 2f, 0f), string.Format("H {0} <color={1}>{2}</color>", info, distCC, currDistance.ToString("0")));
+                            DrawBox(__(heliCC), heli.transform.position + new Vector3(0f, 1f, 0f), GetScale(currDistance));
+                            checks++;
+                        }
                     }
                 }
+                catch (Exception ex)
+                {
+                    HandleException(ex);
+                }
 
-                return LatencyAccepted();
+                return checks;
             }
 
-            private bool ShowBradley()
+            private int ShowBradley()
             {
                 if (!showBradley || (!uiBtnBradley && !trackBradley))
-                    return True;
+                    return checks;
 
                 entityType = EntityType.Bradley;
 
-                if (cache.BradleyAPCs.Count > 0)
+                try
                 {
-                    foreach (var bradley in cache.BradleyAPCs)
+                    if (cache.BradleyAPCs.Count > 0)
                     {
-                        if (bradley == null || bradley.transform == null || bradley.IsDestroyed)
-                            continue;
+                        foreach (var bradley in cache.BradleyAPCs)
+                        {
+                            if (bradley == null || bradley.transform == null || bradley.IsDestroyed)
+                                continue;
 
-                        currDistance = (bradley.transform.position - source.transform.position).magnitude;
-                        string info = string.Format("<color={0}>{1}</color>", healthCC, bradley.health > 1000 ? Math.Floor(bradley.health).ToString("#,##0,K", CultureInfo.InvariantCulture) : Math.Floor(bradley.health).ToString());
+                            currDistance = (bradley.transform.position - source.transform.position).magnitude;
+                            string info = string.Format("<color={0}>{1}</color>", healthCC, bradley.health > 1000 ? Math.Floor(bradley.health).ToString("#,##0,K", CultureInfo.InvariantCulture) : Math.Floor(bradley.health).ToString());
 
-                        DrawText(__(bradleyCC), bradley.transform.position + new Vector3(0f, 2f, 0f), string.Format("B {0} <color={1}>{2}</color>", info, distCC, currDistance.ToString("0")));
-                        DrawBox(__(bradleyCC), bradley.transform.position + new Vector3(0f, 1f, 0f), GetScale(currDistance));
-                        if (objectsLimit > 0 && ++drawnObjects > objectsLimit) return False;
+                            DrawText(__(bradleyCC), bradley.transform.position + new Vector3(0f, 2f, 0f), string.Format("B {0} <color={1}>{2}</color>", info, distCC, currDistance.ToString("0")));
+                            DrawBox(__(bradleyCC), bradley.transform.position + new Vector3(0f, 1f, 0f), GetScale(currDistance));
+                            checks++;
+                        }
                     }
                 }
-                
-                return LatencyAccepted();
+                catch (Exception ex)
+                {
+                    HandleException(ex);
+                }
+
+                return checks;
             }
 
-            bool ShowLimits()
+            private int ShowLimits()
             {
                 entityType = EntityType.GroupLimit;
 
                 if (!drawX)
                 {
-                    return True;
+                    return checks;
                 }
 
-                distantPlayers.RemoveAll(p => p == null || p.transform == null);
-
-                if (distantPlayers.Count == 0)
+                try
                 {
-                    return True;
-                }
+                    distantPlayers.RemoveAll(p => p == null || p.transform == null);
+                    checks++;
 
-                limitIndex = 0;
-                limitFlag = False;
+                    if (distantPlayers.Count == 0)
+                    {
+                        return checks;
+                    }
 
-                foreach(var p in distantPlayers)
-                {
-                    nearbyPlayers.Clear();
+                    limitIndex = 0;
+                    limitFlag = False;
+
+                    foreach (var p in distantPlayers)
+                    {
+                        nearbyPlayers.Clear();
+
+                        for (int j = 0; j < distantPlayers.Count; j++)
+                        {
+                            if ((distantPlayers[j].transform.position - p.transform.position).magnitude < groupRange)
+                            {
+                                limitFlag = False;
+
+                                for (int i = 0; i < groupedPlayers.Values.Count; i++)
+                                {
+                                    if (groupedPlayers[i].Contains(distantPlayers[j]))
+                                    {
+                                        limitFlag = True;
+                                        break;
+                                    }
+                                }
+
+                                if (!limitFlag)
+                                {
+                                    nearbyPlayers.Add(distantPlayers[j]);
+                                }
+
+                            }
+                        }
+
+                        if (nearbyPlayers.Count > groupLimit)
+                        {
+                            while (groupedPlayers.ContainsKey(limitIndex)) limitIndex++;
+                            groupedPlayers.Add(limitIndex, nearbyPlayers.ToList());
+                            removePlayers.AddRange(nearbyPlayers);
+                        }
+                    }
+
+                    distantPlayers.RemoveAll(player => removePlayers.Contains(player));
 
                     for (int j = 0; j < distantPlayers.Count; j++)
                     {
-                        if ((distantPlayers[j].transform.position - p.transform.position).magnitude < groupRange)
+                        DrawText(distantPlayers[j].IsAlive() ? Color.green : Color.red, distantPlayers[j].transform.position + new Vector3(0f, 1f, 0f), "X", true);
+                        checks++;
+                    }
+
+                    for (int j = 0; j < groupedPlayers.Count; j++)
+                    {
+                        for (int k = 0; k < groupedPlayers[j].Count; k++)
                         {
-                            limitFlag = False;
-
-                            for (int i = 0; i < groupedPlayers.Values.Count; i++)
+                            if (groupCountHeight != 0f && k == 0)
                             {
-                                if (groupedPlayers[i].Contains(distantPlayers[j]))
-                                {
-                                    limitFlag = True;
-                                    break;
-                                }
+                                DrawText(Color.magenta, groupedPlayers[j][k].transform.position + new Vector3(0f, groupCountHeight, 0f), groupedPlayers[j].Count.ToString(), true);
                             }
 
-                            if (!limitFlag)
-                            {
-                                nearbyPlayers.Add(distantPlayers[j]);
-                            }
-
+                            DrawText(__(groupedPlayers[j][k].IsAlive() ? GetGroupColor(j) : groupColorDead), groupedPlayers[j][k].transform.position + new Vector3(0f, 1f, 0f), "X", true);
+                            checks++;
                         }
                     }
 
-                    if (nearbyPlayers.Count > groupLimit)
-                    {
-                        while (groupedPlayers.ContainsKey(limitIndex)) limitIndex++;
-                        groupedPlayers.Add(limitIndex, nearbyPlayers.ToList());
-                        removePlayers.AddRange(nearbyPlayers);
-                    }
+                    nearbyPlayers.Clear();
+                    groupedPlayers.Clear();
+                    distantPlayers.Clear();
+                    removePlayers.Clear();
                 }
-
-                distantPlayers.RemoveAll(player => removePlayers.Contains(player));
-                
-                for (int j = 0; j < distantPlayers.Count; j++)
+                catch(Exception ex)
                 {
-                    DrawText(distantPlayers[j].IsAlive() ? Color.green : Color.red, distantPlayers[j].transform.position + new Vector3(0f, 1f, 0f), "X", true);
+                    HandleException(ex);
                 }
 
-                for (int j = 0; j < groupedPlayers.Count; j++)
-                {
-                    for (int k = 0; k < groupedPlayers[j].Count; k++)
-                    {
-                        if (groupCountHeight != 0f && k == 0)
-                        {
-                            DrawText(Color.magenta, groupedPlayers[j][k].transform.position + new Vector3(0f, groupCountHeight, 0f), groupedPlayers[j].Count.ToString(), true);
-                        }
-
-                        DrawText(__(groupedPlayers[j][k].IsAlive() ? GetGroupColor(j) : groupColorDead), groupedPlayers[j][k].transform.position + new Vector3(0f, 1f, 0f), "X", true);
-                    }
-                }
-
-                nearbyPlayers.Clear();
-                groupedPlayers.Clear();
-                distantPlayers.Clear();
-                removePlayers.Clear();
-
-                return LatencyAccepted();
+                return checks;
             }
 
-            private bool ShowTC()
+            private int ShowTC()
             {
                 if (!showTC || !trackTC)
-                    return True;
+                    return checks;
 
                 entityType = EntityType.Cupboards;
                 int bags;
                 float time;
 
-                foreach (var tc in cache.Cupboards)
+                try
                 {
-                    if (tc == null || tc.transform == null || tc.IsDestroyed)
+                    foreach (var tc in cache.Cupboards)
                     {
-                        tcs.Remove(tc);
-                        continue;
-                    }
-
-                    currDistance = (tc.transform.position - source.transform.position).magnitude;
-
-                    if (currDistance < tcDistance && currDistance < maxDistance)
-                    {
-                        if (drawText)
+                        if (tc == null || tc.transform == null || tc.IsDestroyed)
                         {
-                            bags = 0;
+                            tcs.Remove(tc);
+                            continue;
+                        }
 
-                            if (showTCBagCount)
+                        currDistance = (tc.transform.position - source.transform.position).magnitude;
+
+                        if (currDistance < tcDistance && currDistance < maxDistance)
+                        {
+                            if (drawText)
                             {
-                                var building = tc.GetBuilding();
+                                bags = 0;
 
-                                if (building != null)
+                                if (showTCBagCount)
                                 {
-                                    foreach (var entity in building.decayEntities)
+                                    var building = tc.GetBuilding();
+
+                                    if (building != null)
                                     {
-                                        if (entity is SleepingBag)
+                                        foreach (var entity in building.decayEntities)
                                         {
-                                            bags++;
+                                            if (entity is SleepingBag)
+                                            {
+                                                bags++;
+                                            }
                                         }
                                     }
                                 }
+
+                                if (!tcs.ContainsKey(tc))
+                                {
+                                    tcs.Add(tc, new PrivInfo());
+                                }
+
+                                time = Time.realtimeSinceStartup;
+
+                                if (tcs[tc].LastTime == float.MaxValue || time - tcs[tc].LastTime > 60)
+                                {
+                                    tcs[tc].ProtectedMinutes = tc.GetProtectedMinutes();
+                                    tcs[tc].LastTime = time;
+                                }
+
+                                string text = string.Empty;
+
+                                if (bags > 0 && showTCAuthedCount) text = string.Format("TC <color={0}>{1}</color> <color={2}>{3}</color> <color={4}>{5}</color> <color={0}>{6}</color>", distCC, currDistance, bagCC, bags, tcCC, tc.authorizedPlayers.Count, tcs[tc].ProtectedMinutes);
+                                else if (bags > 0) text = string.Format("TC <color={0}>{1}</color> <color={2}>{3}</color> <color={0}>{4}</color>", distCC, currDistance, bagCC, bags, tcs[tc].ProtectedMinutes);
+                                else if (showTCAuthedCount) text = string.Format("TC <color={0}>{1}</color> <color={2}>{3}</color> <color={0}>{4}</color>", distCC, currDistance, tcCC, tc.authorizedPlayers.Count, tcs[tc].ProtectedMinutes);
+                                else text = string.Format("TC <color={0}>{1} {2}</color>", distCC, currDistance, tcs[tc].ProtectedMinutes);
+
+                                DrawText(__(tcCC), tc.transform.position + new Vector3(0f, 0.5f, 0f), text, true);
                             }
 
-                            if (!tcs.ContainsKey(tc))
-                            {
-                                tcs.Add(tc, new PrivInfo());
-                            }
-
-                            time = Time.realtimeSinceStartup;
-
-                            if (tcs[tc].LastTime == float.MaxValue || time - tcs[tc].LastTime > 60)
-                            {
-                                tcs[tc].ProtectedMinutes = tc.GetProtectedMinutes();
-                                tcs[tc].LastTime = time;
-                            }
-
-                            string text = string.Empty;
-
-                            if (bags > 0 && showTCAuthedCount) text = string.Format("TC <color={0}>{1}</color> <color={2}>{3}</color> <color={4}>{5}</color> <color={0}>{6}</color>", distCC, currDistance, bagCC, bags, tcCC, tc.authorizedPlayers.Count, tcs[tc].ProtectedMinutes);
-                            else if (bags > 0) text = string.Format("TC <color={0}>{1}</color> <color={2}>{3}</color> <color={0}>{4}</color>", distCC, currDistance, bagCC, bags, tcs[tc].ProtectedMinutes);
-                            else if (showTCAuthedCount) text = string.Format("TC <color={0}>{1}</color> <color={2}>{3}</color> <color={0}>{4}</color>", distCC, currDistance, tcCC, tc.authorizedPlayers.Count, tcs[tc].ProtectedMinutes);
-                            else text = string.Format("TC <color={0}>{1} {2}</color>", distCC, currDistance, tcs[tc].ProtectedMinutes);
-
-                            DrawText(__(tcCC), tc.transform.position + new Vector3(0f, 0.5f, 0f), text, true);
+                            DrawBox(__(tcCC), tc.transform.position + new Vector3(0f, 0.5f, 0f), 3f);
+                            checks++;
                         }
-
-                        DrawBox(__(tcCC), tc.transform.position + new Vector3(0f, 0.5f, 0f), 3f);
-                        if (objectsLimit > 0 && ++drawnObjects > objectsLimit) return False;
                     }
                 }
+                catch (Exception ex)
+                {
+                    HandleException(ex);
+                }
 
-                return LatencyAccepted();
+                return checks;
             }
 
-            private bool ShowContainers()
+            private int ShowContainers()
             {
                 if (!showBox && !showLoot && !showStash)
                 {
-                    return True;
+                    return checks;
                 }
 
                 bool isBox;
                 bool isLoot;
 
-                if (showLoot)
+                try
                 {
-                    entityType = EntityType.Backpacks;
-
-                    foreach (var backpack in cache.Backpacks)
+                    if (showLoot)
                     {
-                        if (backpack == null || backpack.transform == null || backpack.IsDestroyed)
-                            continue;
+                        entityType = EntityType.Backpacks;
 
-                        currDistance = (backpack.transform.position - source.transform.position).magnitude;
-
-                        if (currDistance > maxDistance || currDistance > lootDistance)
-                            continue;
-
-                        DrawText(__(backpackCC), backpack.transform.position + new Vector3(0f, 0.5f, 0f), string.Format("{0} {1}<color={2}>{3}</color>", string.IsNullOrEmpty(backpack._playerName) ? ins.msg("backpack", player.UserIDString) : backpack._playerName, GetContents(backpack), distCC, currDistance.ToString("0")));
-                        DrawBox(__(backpackCC), backpack.transform.position + new Vector3(0f, 0.5f, 0f), GetScale(currDistance));
-                        if (objectsLimit > 0 && ++drawnObjects > objectsLimit) return False;
-                    }
-                }
-
-                if (showBox && trackSupplyDrops)
-                {
-                    entityType = EntityType.Airdrops;
-
-                    foreach (var drop in cache.SupplyDrops)
-                    {
-                        if (drop == null || drop.transform == null || drop.IsDestroyed)
-                            continue;
-
-                        currDistance = (drop.transform.position - source.transform.position).magnitude;
-
-                        if (currDistance > maxDistance || currDistance > adDistance)
-                            continue;
-
-                        string text = showAirdropContents && drop.inventory.itemList.Count > 0 ? GetContents(drop.inventory.itemList) : string.Format("({0}) ", drop.inventory.itemList.Count);
-
-                        DrawText(__(airdropCC), drop.transform.position + new Vector3(0f, 0.5f, 0f), string.Format("{0} {1}<color={2}>{3}</color>", _(drop.ShortPrefabName), text, distCC, currDistance.ToString("0"), lootCC));
-                        DrawBox(__(airdropCC), drop.transform.position + new Vector3(0f, 0.5f, 0f), GetScale(currDistance));
-                    }
-                }
-
-                entityType = EntityType.Containers;
-
-                foreach (var container in cache.Containers)
-                {
-                    if (container == null || container.transform == null || container.IsDestroyed)
-                        continue;
-
-                    currDistance = (container.transform.position - source.transform.position).magnitude;
-
-                    if (currDistance > maxDistance)
-                        continue;
-
-                    isBox = IsBox(container.ShortPrefabName);
-                    isLoot = IsLoot(container.ShortPrefabName);
-
-                    if (container is StashContainer)
-                    {
-                        if (!showStash || currDistance > stashDistance || !trackStash)
-                            continue;
-                    }
-                    else if (isBox)
-                    {
-                        if (!showBox || currDistance > boxDistance || !trackBox)
-                            continue;
-                    }
-                    else if (isLoot)
-                    {
-                        if (!showLoot || currDistance > lootDistance || !trackLoot)
-                            continue;
-                    }
-
-                    string colorHex = isBox ? boxCC : isLoot ? lootCC : stashCC;
-                    _cachedStringBuilder.Clear();
-
-                    if (ins.storedData.OnlineBoxes.Contains(player.UserIDString) && container.OwnerID.IsSteamId() && (container.name.Contains("box") || container.name.Contains("coffin")))
-                    {
-                        var owner = BasePlayer.FindByID(container.OwnerID);
-
-                        if (owner == null || !owner.IsConnected)
+                        foreach (var backpack in cache.Backpacks)
                         {
-                            continue;
+                            if (backpack == null || backpack.transform == null || backpack.IsDestroyed)
+                                continue;
+
+                            currDistance = (backpack.transform.position - source.transform.position).magnitude;
+
+                            if (currDistance > maxDistance || currDistance > lootDistance)
+                                continue;
+
+                            DrawText(__(backpackCC), backpack.transform.position + new Vector3(0f, 0.5f, 0f), string.Format("{0} {1}<color={2}>{3}</color>", string.IsNullOrEmpty(backpack._playerName) ? ins.msg("backpack", player.UserIDString) : backpack._playerName, GetContents(backpack), distCC, currDistance.ToString("0")));
+                            DrawBox(__(backpackCC), backpack.transform.position + new Vector3(0f, 0.5f, 0f), GetScale(currDistance));
+                            checks++;
                         }
                     }
 
-                    string text = container.inventory?.itemList?.Count > 0 ? (isLoot && showLootContents || container is StashContainer && showStashContents ? GetContents(container.inventory.itemList) : string.Format("({0}) ", container.inventory.itemList.Count)) : string.Empty;
+                    if (showBox && trackSupplyDrops)
+                    {
+                        entityType = EntityType.Airdrops;
 
-                    if (text.Length == 0 && !drawEmptyContainers) continue;
+                        foreach (var drop in cache.SupplyDrops)
+                        {
+                            if (drop == null || drop.transform == null || drop.IsDestroyed)
+                                continue;
 
-                    string shortname = _(container.ShortPrefabName).Replace("coffinstorage", "coffin");
-                    DrawText(__(colorHex), container.transform.position + new Vector3(0f, 0.5f, 0f), string.Format("{0} {1}<color={2}>{3}</color>", shortname, text, distCC, currDistance.ToString("0")));
-                    DrawBox(__(colorHex), container.transform.position + new Vector3(0f, 0.5f, 0f), GetScale(currDistance));
-                    if (objectsLimit > 0 && ++drawnObjects > objectsLimit) return False;
+                            currDistance = (drop.transform.position - source.transform.position).magnitude;
+
+                            if (currDistance > maxDistance || currDistance > adDistance)
+                                continue;
+
+                            string text = showAirdropContents && drop.inventory.itemList.Count > 0 ? GetContents(drop.inventory.itemList) : string.Format("({0}) ", drop.inventory.itemList.Count);
+
+                            DrawText(__(airdropCC), drop.transform.position + new Vector3(0f, 0.5f, 0f), string.Format("{0} {1}<color={2}>{3}</color>", _(drop.ShortPrefabName), text, distCC, currDistance.ToString("0"), lootCC));
+                            DrawBox(__(airdropCC), drop.transform.position + new Vector3(0f, 0.5f, 0f), GetScale(currDistance));
+                            checks++;
+                        }
+                    }
+
+                    entityType = EntityType.Containers;
+
+                    foreach (var container in cache.Containers)
+                    {
+                        if (container == null || container.transform == null || container.IsDestroyed)
+                            continue;
+
+                        currDistance = (container.transform.position - source.transform.position).magnitude;
+
+                        if (currDistance > maxDistance)
+                            continue;
+
+                        isBox = IsBox(container.ShortPrefabName);
+                        isLoot = IsLoot(container.ShortPrefabName);
+
+                        if (container is StashContainer)
+                        {
+                            if (!showStash || currDistance > stashDistance || !trackStash)
+                                continue;
+                        }
+                        else if (isBox)
+                        {
+                            if (!showBox || currDistance > boxDistance || !trackBox)
+                                continue;
+                        }
+                        else if (isLoot)
+                        {
+                            if (!showLoot || currDistance > lootDistance || !trackLoot)
+                                continue;
+                        }
+
+                        string colorHex = isBox ? boxCC : isLoot ? lootCC : stashCC;
+                        _cachedStringBuilder.Clear();
+
+                        if (ins.storedData.OnlineBoxes.Contains(player.UserIDString) && container.OwnerID.IsSteamId() && (container.name.Contains("box") || container.name.Contains("coffin")))
+                        {
+                            var owner = BasePlayer.FindByID(container.OwnerID);
+
+                            if (owner == null || !owner.IsConnected)
+                            {
+                                continue;
+                            }
+                        }
+
+                        string text = container.inventory?.itemList?.Count > 0 ? (isLoot && showLootContents || container is StashContainer && showStashContents ? GetContents(container.inventory.itemList) : string.Format("({0}) ", container.inventory.itemList.Count)) : string.Empty;
+
+                        if (text.Length == 0 && !drawEmptyContainers) continue;
+
+                        string shortname = _(container.ShortPrefabName).Replace("coffinstorage", "coffin");
+                        DrawText(__(colorHex), container.transform.position + new Vector3(0f, 0.5f, 0f), string.Format("{0} {1}<color={2}>{3}</color>", shortname, text, distCC, currDistance.ToString("0")));
+                        DrawBox(__(colorHex), container.transform.position + new Vector3(0f, 0.5f, 0f), GetScale(currDistance));
+                        checks++;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    HandleException(ex);
                 }
 
-                return LatencyAccepted();
+                return checks;
             }
 
-            private bool ShowBags()
+            private int ShowBags()
             {
                 if (!showBags || !trackBags)
-                    return True;
+                    return checks;
 
                 entityType = EntityType.Bags;
 
-                foreach (var bag in cache.Bags)
+                try
                 {
-                    currDistance = (bag.Key - source.transform.position).magnitude;
-
-                    if (currDistance < bagDistance && currDistance < maxDistance)
+                    foreach (var bag in cache.Bags)
                     {
-                        DrawText(__(bagCC), bag.Key, string.Format("bag <color={0}>{1}</color>", distCC, currDistance.ToString("0")));
-                        DrawBox(__(bagCC), bag.Key, bag.Value.Size);
-                        if (objectsLimit > 0 && ++drawnObjects > objectsLimit) return False;
+                        currDistance = (bag.Key - source.transform.position).magnitude;
+
+                        if (currDistance < bagDistance && currDistance < maxDistance)
+                        {
+                            DrawText(__(bagCC), bag.Key, string.Format("bag <color={0}>{1}</color>", distCC, currDistance.ToString("0")));
+                            DrawBox(__(bagCC), bag.Key, bag.Value.Size);
+                            checks++;
+                        }
                     }
                 }
+                catch(Exception ex)
+                {
+                    HandleException(ex);
+                }
 
-                return LatencyAccepted();
+                return checks;
             }
 
-            private bool ShowTurrets()
+            private int ShowTurrets()
             {
                 if (!showTurrets || !trackTurrets)
-                    return True;
+                    return checks;
 
                 entityType = EntityType.Turrets;
 
-                foreach (var turret in cache.Turrets)
+                try
                 {
-                    currDistance = (turret.transform.position - source.transform.position).magnitude;
-
-                    if (currDistance < turretDistance && currDistance < maxDistance)
+                    foreach (var turret in cache.Turrets)
                     {
-                        DrawText(__(atCC), turret.transform.position + new Vector3(0f, 0.5f, 0f), string.Format("AT ({0}) <color={1}>{2}</color>", turret.inventory?.itemList?.Count ?? -1, distCC, currDistance.ToString("0")));
-                        DrawBox(__(atCC), turret.transform.position + new Vector3(0f, 0.5f, 0f), 1f);
-                        if (objectsLimit > 0 && ++drawnObjects > objectsLimit) return False;
+                        currDistance = (turret.transform.position - source.transform.position).magnitude;
+
+                        if (currDistance < turretDistance && currDistance < maxDistance)
+                        {
+                            DrawText(__(atCC), turret.transform.position + new Vector3(0f, 0.5f, 0f), string.Format("AT ({0}) <color={1}>{2}</color>", turret.inventory?.itemList?.Count ?? -1, distCC, currDistance.ToString("0")));
+                            DrawBox(__(atCC), turret.transform.position + new Vector3(0f, 0.5f, 0f), 1f);
+                            checks++;
+                        }
                     }
                 }
+                catch (Exception ex)
+                {
+                    HandleException(ex);
+                }
 
-                return LatencyAccepted();
+                return checks;
             }
 
-            private bool ShowDead()
+            private int ShowDead()
             {
                 if (!showDead || !trackDead)
-                    return True;
+                    return checks;
 
                 entityType = EntityType.Dead;
 
-                foreach (var corpse in cache.Corpses)
+                try
                 {
-                    if (corpse.Key == null || corpse.Key.transform == null || corpse.Key.IsDestroyed)
-                        continue;
-
-                    currDistance = (corpse.Key.transform.position - source.transform.position).magnitude;
-
-                    if (currDistance < corpseDistance && currDistance < maxDistance)
+                    foreach (var corpse in cache.Corpses)
                     {
-                        DrawText(__(corpseCC), corpse.Key.transform.position + new Vector3(0f, 0.25f, 0f), string.Format("{0} ({1})", corpse.Value.Name, corpse.Value.Info));
-                        DrawBox(__(corpseCC), corpse.Key.transform.position, GetScale(currDistance));
-                        if (objectsLimit > 0 && ++drawnObjects > objectsLimit) return False;
+                        if (corpse.Key == null || corpse.Key.transform == null || corpse.Key.IsDestroyed)
+                            continue;
+
+                        currDistance = (corpse.Key.transform.position - source.transform.position).magnitude;
+
+                        if (currDistance < corpseDistance && currDistance < maxDistance)
+                        {
+                            DrawText(__(corpseCC), corpse.Key.transform.position + new Vector3(0f, 0.25f, 0f), string.Format("{0} ({1})", corpse.Value.Name, corpse.Value.Info));
+                            DrawBox(__(corpseCC), corpse.Key.transform.position, GetScale(currDistance));
+                            checks++;
+                        }
                     }
                 }
+                catch(Exception ex)
+                {
+                    HandleException(ex);
+                }
 
-                return LatencyAccepted();
+                return checks;
             }
 
-            private bool ShowNPC()
+            private int ShowNPC()
             {
                 if (!showNPC || !trackNPC)
-                    return True;
+                    return checks;
 
                 entityType = EntityType.Zombies;
-                float j, k = TerrainMeta.HeightMap.GetHeight(source.transform.position);
 
-                foreach (var zombie in cache.Zombies)
+                try
                 {
-                    if (zombie == null || zombie.transform == null || zombie.IsDestroyed)
-                        continue;
+                    float j, k = TerrainMeta.HeightMap.GetHeight(source.transform.position);
 
-                    currDistance = (zombie.transform.position - source.transform.position).magnitude;
-
-                    if (currDistance > maxDistance)
-                        continue;
-
-                    if (currDistance < playerDistance)
+                    foreach (var zombie in cache.Zombies)
                     {
-                        DrawArrow(__(zombieCC), zombie.transform.position + new Vector3(0f, zombie.transform.position.y + 10), zombie.transform.position, 1, false);
-                        DrawText(__(zombieCC), zombie.transform.position + new Vector3(0f, 2f, 0f), string.Format("{0} <color={1}>{2}</color> <color={3}>{4}</color>", ins.msg("Zombie", player.UserIDString), healthCC, Math.Floor(zombie.health), distCC, currDistance.ToString("0")));
-                        DrawBox(__(zombieCC), zombie.transform.position + new Vector3(0f, 1f, 0f), GetScale(currDistance));
+                        if (zombie == null || zombie.transform == null || zombie.IsDestroyed)
+                            continue;
+
+                        currDistance = (zombie.transform.position - source.transform.position).magnitude;
+
+                        if (currDistance > maxDistance)
+                            continue;
+
+                        if (currDistance < playerDistance)
+                        {
+                            DrawArrow(__(zombieCC), zombie.transform.position + new Vector3(0f, zombie.transform.position.y + 10), zombie.transform.position, 1, false);
+                            DrawText(__(zombieCC), zombie.transform.position + new Vector3(0f, 2f, 0f), string.Format("{0} <color={1}>{2}</color> <color={3}>{4}</color>", ins.msg("Zombie", player.UserIDString), healthCC, Math.Floor(zombie.health), distCC, currDistance.ToString("0")));
+                            DrawBox(__(zombieCC), zombie.transform.position + new Vector3(0f, 1f, 0f), GetScale(currDistance));
+                        }
+                        else DrawBox(__(zombieCC), zombie.transform.position + new Vector3(0f, 1f, 0f), 5f, true);
+
+                        checks++;
                     }
-                    else DrawBox(__(zombieCC), zombie.transform.position + new Vector3(0f, 1f, 0f), 5f, true);
 
-                    if (objectsLimit > 0 && ++drawnObjects > objectsLimit) return False;
-                }
+                    entityType = EntityType.Npc;
 
-                entityType = EntityType.Npc;
+                    foreach (var target in cache.NPCPlayers)
+                    {
+                        if (target == null || target.transform == null || target.IsDestroyed)
+                            continue;
 
-                foreach (var target in cache.NPCPlayers)
-                {
-                    if (target == null || target.transform == null || target.IsDestroyed)
-                        continue;
-
-                    currDistance = (target.transform.position - source.transform.position).magnitude;
+                        currDistance = (target.transform.position - source.transform.position).magnitude;
 
 #if DEBUG
-                    if (currDistance > maxDistance) distantPlayers.Add(target);
+                        if (currDistance > maxDistance) distantPlayers.Add(target);
 #endif
 
-                    if (player == target || currDistance > maxDistance)
-                        continue;
+                        if (player == target || currDistance > maxDistance)
+                            continue;
 
-                    if (skipUnderworld)
-                    {
-                        j = TerrainMeta.HeightMap.GetHeight(target.transform.position);
-
-                        if (j > target.transform.position.y)
+                        if (skipUnderworld)
                         {
-                            if (source.transform.position.y > k)
+                            j = TerrainMeta.HeightMap.GetHeight(target.transform.position);
+
+                            if (j > target.transform.position.y)
                             {
-                                continue;
+                                if (source.transform.position.y > k)
+                                {
+                                    continue;
+                                }
+                            }
+                            else
+                            {
+                                if (source.transform.position.y < k)
+                                {
+                                    continue;
+                                }
                             }
                         }
-                        else
+
+                        string npcColor = target is HTNPlayer ? htnscientistCC : target.ShortPrefabName.Contains("peacekeeper") ? peacekeeperCC : target.name.Contains("scientist") ? scientistCC : target.ShortPrefabName == "murderer" ? murdererCC : npcCC;
+
+                        if (currDistance < npcPlayerDistance)
                         {
-                            if (source.transform.position.y < k)
-                            {
-                                continue;
-                            }
-                        }
-                    }
-
-                    string npcColor = target is HTNPlayer ? htnscientistCC : target.ShortPrefabName.Contains("peacekeeper") ? peacekeeperCC : target.name.Contains("scientist") ? scientistCC : target.ShortPrefabName == "murderer" ? murdererCC : npcCC;
-
-                    if (currDistance < npcPlayerDistance)
-                    {
-                        string displayName = !string.IsNullOrEmpty(target.displayName) && IsLetters(target.displayName) ? target.displayName : target.ShortPrefabName == "scarecrow" ? ins.msg("scarecrow", player.UserIDString) : target.PrefabName.Contains("scientist") ? ins.msg("scientist", player.UserIDString) : target is NPCMurderer ? ins.msg("murderer", player.UserIDString) : ins.msg("npc", player.UserIDString);
+                            string displayName = !string.IsNullOrEmpty(target.displayName) && IsLetters(target.displayName) ? target.displayName : target.ShortPrefabName == "scarecrow" ? ins.msg("scarecrow", player.UserIDString) : target.PrefabName.Contains("scientist") ? ins.msg("scientist", player.UserIDString) : target is NPCMurderer ? ins.msg("murderer", player.UserIDString) : ins.msg("npc", player.UserIDString);
 #if DEBUG
-                        displayName = target is HTNPlayer ? "htn" : target is NPCMurderer ? "murderer" : target is Scientist ? "scientist" : target.ShortPrefabName;
+                            displayName = target is HTNPlayer ? "htn" : target is NPCMurderer ? "murderer" : target is Scientist ? "scientist" : target.ShortPrefabName;
 #endif
-                        DrawArrow(__(npcColor), target.transform.position + new Vector3(0f, target.transform.position.y + 10), target.transform.position, 1, false);
-                        DrawText(__(npcColor), target.transform.position + new Vector3(0f, 2f, 0f), string.Format("{0} <color={1}>{2}</color> <color={3}>{4}</color>", displayName, healthCC, Math.Floor(target.health), distCC, currDistance.ToString("0")));
-                        DrawBox(__(npcColor), target.transform.position + new Vector3(0f, 1f, 0f), target.GetHeight(target.modelState.ducked));
+                            DrawArrow(__(npcColor), target.transform.position + new Vector3(0f, target.transform.position.y + 10), target.transform.position, 1, false);
+                            DrawText(__(npcColor), target.transform.position + new Vector3(0f, 2f, 0f), string.Format("{0} <color={1}>{2}</color> <color={3}>{4}</color>", displayName, healthCC, Math.Floor(target.health), distCC, currDistance.ToString("0")));
+                            DrawBox(__(npcColor), target.transform.position + new Vector3(0f, 1f, 0f), target.GetHeight(target.modelState.ducked));
+                        }
+                        else DrawBox(__(npcColor), target.transform.position + new Vector3(0f, 1f, 0f), 5f, true);
+
+                        checks++;
                     }
-                    else DrawBox(__(npcColor), target.transform.position + new Vector3(0f, 1f, 0f), 5f, true);
 
-                    if (objectsLimit > 0 && ++drawnObjects > objectsLimit) return False;
-                }
-
-                entityType = EntityType.Animals;
-                foreach (var npc in cache.Animals)
-                {
-                    if (npc == null || npc.transform == null || npc.IsDestroyed)
-                        continue;
-
-                    currDistance = (npc.transform.position - source.transform.position).magnitude;
-
-                    if (currDistance < npcDistance && currDistance < maxDistance)
+                    entityType = EntityType.Animals;
+                    foreach (var npc in cache.Animals)
                     {
-                        DrawText(__(npcCC), npc.transform.position + new Vector3(0f, 1f, 0f), string.Format("{0} <color={1}>{2}</color> <color={3}>{4}</color>", npc.ShortPrefabName, healthCC, Math.Floor(npc.health), distCC, currDistance.ToString("0")));
-                        DrawBox(__(npcCC), npc.transform.position + new Vector3(0f, 1f, 0f), npc.bounds.size.y);
-                        if (objectsLimit > 0 && ++drawnObjects > objectsLimit) return False;
+                        if (npc == null || npc.transform == null || npc.IsDestroyed)
+                            continue;
+
+                        currDistance = (npc.transform.position - source.transform.position).magnitude;
+
+                        if (currDistance < npcDistance && currDistance < maxDistance)
+                        {
+                            DrawText(__(npcCC), npc.transform.position + new Vector3(0f, 1f, 0f), string.Format("{0} <color={1}>{2}</color> <color={3}>{4}</color>", npc.ShortPrefabName, healthCC, Math.Floor(npc.health), distCC, currDistance.ToString("0")));
+                            DrawBox(__(npcCC), npc.transform.position + new Vector3(0f, 1f, 0f), npc.bounds.size.y);
+                            checks++;
+                        }
                     }
                 }
+                catch (Exception ex)
+                {
+                    HandleException(ex);
+                }
 
-                return LatencyAccepted();
+                return checks;
             }
 
-            private bool ShowOre()
+            private int ShowOre()
             {
                 if (!showOre || !trackOre)
-                    return True;
+                    return checks;
 
                 entityType = EntityType.Ore;
 
-                foreach (var ore in cache.Ores)
+                try
                 {
-                    currDistance = (ore.Key - source.transform.position).magnitude;
-
-                    if (currDistance < oreDistance && currDistance < maxDistance)
+                    foreach (var ore in cache.Ores)
                     {
-                        string info = showResourceAmounts ? string.Format("({0})", ore.Value.Info) : string.Format("<color={0}>{1}</color>", distCC, currDistance.ToString("0"));
-                        DrawText(__(resourceCC), ore.Key + new Vector3(0f, 1f, 0f), string.Format("{0} {1}", ore.Value.Name, info));
-                        DrawBox(__(resourceCC), ore.Key + new Vector3(0f, 1f, 0f), GetScale(currDistance));
-                        if (objectsLimit > 0 && ++drawnObjects > objectsLimit) return False;
+                        currDistance = (ore.Key - source.transform.position).magnitude;
+
+                        if (currDistance < oreDistance && currDistance < maxDistance)
+                        {
+                            string info = showResourceAmounts ? string.Format("({0})", ore.Value.Info) : string.Format("<color={0}>{1}</color>", distCC, currDistance.ToString("0"));
+                            DrawText(__(resourceCC), ore.Key + new Vector3(0f, 1f, 0f), string.Format("{0} {1}", ore.Value.Name, info));
+                            DrawBox(__(resourceCC), ore.Key + new Vector3(0f, 1f, 0f), GetScale(currDistance));
+                            checks++;
+                        }
                     }
                 }
+                catch (Exception ex)
+                {
+                    HandleException(ex);
+                }
 
-                return LatencyAccepted();
+                return checks;
             }
 
-            private bool ShowCollectables()
+            private int ShowCCTV()
+            {
+                if (!showCCTV || !trackCCTV)
+                    return checks;
+
+                entityType = EntityType.CCTV;
+
+                try
+                {
+                    foreach (var cctv in cache.CCTV)
+                    {
+                        currDistance = (cctv.transform.position - source.transform.position).magnitude;
+
+                        if (currDistance < cctvDistance && currDistance < maxDistance)
+                        {
+                            int viewers = (int)(numViewers.GetValue(cctv) ?? 0);
+                            string info = string.Format("<color={0}>{1}</color> {2}", distCC, currDistance.ToString("0"), viewers);
+                            var color = cctv.HasFlag(BaseEntity.Flags.Reserved5) ? Color.green : cctv.CanControl() ? Color.cyan : Color.red;
+                            DrawText(color, cctv.transform.position + new Vector3(0f, 0.3f, 0f), string.Format("CCTV {0}", info));
+                            DrawBox(color, cctv.transform.position, 0.25f);
+                            checks++;
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    HandleException(ex);
+                }
+
+                return checks;
+            }
+
+            private int ShowCollectables()
             {
                 if (!showCollectible || !trackCollectibles)
-                    return True;
+                    return checks;
 
                 entityType = EntityType.Collectibles;
 
-                foreach (var col in cache.Collectibles)
+                try
                 {
-                    currDistance = (col.Key - source.transform.position).magnitude;
-
-                    if (currDistance < colDistance && currDistance < maxDistance)
+                    foreach (var col in cache.Collectibles)
                     {
-                        string info = showResourceAmounts ? string.Format("({0})", col.Value.Info) : string.Format("<color={0}>{1}</color>", distCC, currDistance.ToString("0"));
-                        DrawText(__(colCC), col.Key + new Vector3(0f, 1f, 0f), string.Format("{0} {1}", _(col.Value.Name), info));
-                        DrawBox(__(colCC), col.Key + new Vector3(0f, 1f, 0f), col.Value.Size);
-                        if (objectsLimit > 0 && ++drawnObjects > objectsLimit) return False;
+                        currDistance = (col.Key - source.transform.position).magnitude;
+
+                        if (currDistance < colDistance && currDistance < maxDistance)
+                        {
+                            string info = showResourceAmounts ? string.Format("({0})", col.Value.Info) : string.Format("<color={0}>{1}</color>", distCC, currDistance.ToString("0"));
+                            DrawText(__(colCC), col.Key + new Vector3(0f, 1f, 0f), string.Format("{0} {1}", _(col.Value.Name), info));
+                            DrawBox(__(colCC), col.Key + new Vector3(0f, 1f, 0f), col.Value.Size);
+                            checks++;
+                        }
                     }
                 }
+                catch (Exception ex)
+                {
+                    HandleException(ex);
+                }
 
-                return LatencyAccepted();
+                return checks;
             }
 
-            private bool ShowEntity(EntityType entityType, bool track, string entityName, HashSet<BaseEntity> entities)
+            private int ShowEntity(EntityType entityType, bool track, string entityName, List<BaseEntity> entities)
             {
                 if (!track)
-                    return True;
+                    return checks;
 
                 this.entityType = entityType;
 
-                if (entities.Count > 0)
+                try
                 {
-                    foreach (var e in entities)
+                    if (entities.Count > 0)
                     {
-                        if (e == null || e.transform == null || e.IsDestroyed)
-                            continue;
-
-                        currDistance = (e.transform.position - source.transform.position).magnitude;
-
-                        if (entityType == EntityType.Boats || entityType == EntityType.RigidHullInflatableBoats)
+                        foreach (var e in entities)
                         {
-                            if (currDistance > boatDistance) continue;
-                            if (!trackRigidHullInflatableBoats && !uiBtnRHIB) continue;
-                        }
-                        else if (entityType == EntityType.Cars)
-                        {
-                            if (currDistance > carDistance) continue;
-                            if (!trackCars && !uiBtnCars) continue;
-                        }
-                        else if (entityType == EntityType.MiniCopter)
-                        {
-                            if (currDistance > mcDistance) continue;
-                            if (!trackMiniCopter && !uiBtnMiniCopter) continue;
-                        }
-                        else if (entityType == EntityType.RidableHorses)
-                        {
-                            if (currDistance > rhDistance) continue;
-                            if (!trackRidableHorses && !uiBtnRidableHorses) continue;
-                        }
-                        else if (entityType == EntityType.CH47Helicopters && !trackCH47 && !uiBtnCH47) continue;
+                            if (e == null || e.transform == null || e.IsDestroyed)
+                                continue;
 
-                        string info = e.Health() <= 0 ? entityName : string.Format("{0} <color={1}>{2}</color>", entityName, healthCC, e.Health() > 1000 ? Math.Floor(e.Health()).ToString("#,##0,K", CultureInfo.InvariantCulture) : Math.Floor(e.Health()).ToString("#0"));
+                            currDistance = (e.transform.position - source.transform.position).magnitude;
 
-                        DrawText(__(bradleyCC), e.transform.position + new Vector3(0f, 2f, 0f), string.Format("{0} <color={1}>{2}</color>", info, distCC, currDistance.ToString("0")));
-                        DrawBox(__(bradleyCC), e.transform.position + new Vector3(0f, 1f, 0f), GetScale(currDistance));
-                        if (objectsLimit > 0 && ++drawnObjects > objectsLimit) return False;
+                            if (entityType == EntityType.Boats || entityType == EntityType.RigidHullInflatableBoats)
+                            {
+                                if (currDistance > boatDistance) continue;
+                                if (!trackRigidHullInflatableBoats && !uiBtnRHIB) continue;
+                            }
+                            else if (entityType == EntityType.Cars)
+                            {
+                                if (currDistance > carDistance) continue;
+                                if (!trackCars && !uiBtnCars) continue;
+                            }
+                            else if (entityType == EntityType.MiniCopter)
+                            {
+                                if (currDistance > mcDistance) continue;
+                                if (!trackMiniCopter && !uiBtnMiniCopter) continue;
+                            }
+                            else if (entityType == EntityType.RidableHorses)
+                            {
+                                if (currDistance > rhDistance) continue;
+                                if (!trackRidableHorses && !uiBtnRidableHorses) continue;
+                            }
+                            else if (entityType == EntityType.CH47Helicopters && !trackCH47 && !uiBtnCH47) continue;
+
+                            string info = e.Health() <= 0 ? entityName : string.Format("{0} <color={1}>{2}</color>", entityName, healthCC, e.Health() > 1000 ? Math.Floor(e.Health()).ToString("#,##0,K", CultureInfo.InvariantCulture) : Math.Floor(e.Health()).ToString("#0"));
+
+                            DrawText(__(bradleyCC), e.transform.position + new Vector3(0f, 2f, 0f), string.Format("{0} <color={1}>{2}</color>", info, distCC, currDistance.ToString("0")));
+                            DrawBox(__(bradleyCC), e.transform.position + new Vector3(0f, 1f, 0f), GetScale(currDistance));
+                            checks++;
+                        }
                     }
                 }
+                catch (Exception ex)
+                {
+                    HandleException(ex);
+                }
 
-                return LatencyAccepted();
+                return checks;
             }
 
             private string GetContents(List<Item> itemList)
@@ -1781,19 +2021,10 @@ namespace Oxide.Plugins
 
             foreach(var radar in activeRadars)
             {
-                radar.StopAllCoroutines();
+                radar.StopAll();
             }
 
-            var radarObjects = UnityEngine.Object.FindObjectsOfType(typeof(Radar));
-
-            if (radarObjects != null)
-            {
-                foreach (var gameObj in radarObjects)
-                {
-                    UnityEngine.Object.Destroy(gameObj);
-                }
-            }
-
+            DestroyAll<Radar>();
             playersColor.Clear();
             tags.Clear();
             voices.Clear();
@@ -1805,6 +2036,19 @@ namespace Oxide.Plugins
             itemExceptions.Clear();
             groupColors.Clear();
             cooldowns.Clear();
+        }
+
+        void DestroyAll<T>()
+        {
+            var objects = UnityEngine.Object.FindObjectsOfType(typeof(T));
+
+            if (objects != null)
+            {
+                foreach (var gameObj in objects)
+                {
+                    UnityEngine.Object.Destroy(gameObj);
+                }
+            }
         }
 
         private object BlockDamage(HitInfo hitInfo, BasePlayer player, bool flag, string key)
@@ -1819,7 +2063,7 @@ namespace Oxide.Plugins
                 string playerId = player.UserIDString;
 
                 warnings.Add(playerId);
-                player.ChatMessage(msg(key, playerId));
+                Message(player, msg(key, playerId));
                 timer.Once(5f, () => warnings.Remove(playerId));
             }
 
@@ -1962,38 +2206,65 @@ namespace Oxide.Plugins
 
             if (trackNPC && entity.IsNpc)
             {
-                if (entity is BaseNpc)
+                if (entity is BaseNpc && !cache.Animals.Contains(entity as BaseNpc))
                 {
-                    return cache.Animals.Add(entity as BaseNpc);
+                    cache.Animals.Add(entity as BaseNpc);
+                    return True;
                 }
-                else if (entity is BasePlayer)
+                else if (entity is BasePlayer && !cache.NPCPlayers.Contains(entity as BasePlayer))
                 {
-                    return cache.NPCPlayers.Add(entity as BasePlayer);
+                    cache.NPCPlayers.Add(entity as BasePlayer);
+                    return True;
                 }
-                else if (entity is Zombie)
+                else if (entity is Zombie && !cache.Zombies.Contains(entity as Zombie))
                 {
-                    return cache.Zombies.Add(entity as Zombie);
+                    cache.Zombies.Add(entity as Zombie);
+                    return True;
                 }
 
                 return False;
             }
 
-            if (trackTC && entity is BuildingPrivlidge)
+            if (trackCCTV && entity is CCTV_RC)
             {
-                return cache.Cupboards.Add(entity as BuildingPrivlidge);
+                if (!cache.CCTV.Contains(entity as CCTV_RC))
+                {
+                    cache.CCTV.Add(entity as CCTV_RC);
+                    return True;
+                }
+            }
+            else if (trackTC && entity is BuildingPrivlidge)
+            {
+                if (!cache.Cupboards.Contains(entity as BuildingPrivlidge))
+                {
+                    cache.Cupboards.Add(entity as BuildingPrivlidge);
+                    return True;
+                }
             }
             else if (entity is StorageContainer)
             {
-                if (trackSupplyDrops && entity is SupplyDrop)
+                if (trackSupplyDrops && entity is SupplyDrop && !cache.SupplyDrops.Contains(entity as SupplyDrop))
                 {
-                    return cache.SupplyDrops.Add(entity as SupplyDrop);
+                    cache.SupplyDrops.Add(entity as SupplyDrop);
+                    return True;
                 }
-
-                return IsBox(entity.ShortPrefabName) || IsLoot(entity.ShortPrefabName) ? cache.Containers.Add(entity as StorageContainer) : False;
+                else if (IsBox(entity.ShortPrefabName) || IsLoot(entity.ShortPrefabName))
+                {
+                    if (!cache.Containers.Contains(entity as StorageContainer))
+                    {
+                        cache.Containers.Add(entity as StorageContainer);
+                        return True;
+                    }
+                }
+                return False;
             }
             else if (trackLoot && entity is DroppedItemContainer)
             {
-                return cache.Backpacks.Add(entity as DroppedItemContainer);
+                if (!cache.Backpacks.Contains(entity as DroppedItemContainer))
+                {
+                    cache.Backpacks.Add(entity as DroppedItemContainer);
+                    return True;
+                }
             }
             else if (trackCollectibles && entity is CollectibleEntity)
             {
@@ -2058,47 +2329,91 @@ namespace Oxide.Plugins
             }
             else if (trackCargoPlanes && entity is CargoPlane)
             {
-                return cache.CargoPlanes.Add(entity as CargoPlane);
+                if (!cache.CargoPlanes.Contains(entity as CargoPlane))
+                {
+                    cache.CargoPlanes.Add(entity as CargoPlane);
+                    return True;
+                }
             }
             else if (trackHeli && entity is BaseHelicopter)
             {
-                return cache.Helicopters.Add(entity as BaseHelicopter);
+                if (!cache.Helicopters.Contains(entity as BaseHelicopter))
+                {
+                    cache.Helicopters.Add(entity as BaseHelicopter);
+                    return True;
+                }
             }
             else if (trackBradley && entity is BradleyAPC)
             {
-                return cache.BradleyAPCs.Add(entity as BradleyAPC);
+                if (!cache.BradleyAPCs.Contains(entity as BradleyAPC))
+                {
+                    cache.BradleyAPCs.Add(entity as BradleyAPC);
+                    return True;
+                }
             }
             else if (trackRidableHorses && entity is RidableHorse)
             {
-                return cache.RidableHorse.Add(entity);
+                if (!cache.RidableHorse.Contains(entity))
+                {
+                    cache.RidableHorse.Add(entity);
+                    return True;
+                }
             }
             else if (trackRigidHullInflatableBoats && entity is RHIB)
             {
-                return cache.RHIB.Add(entity);
+                if (!cache.RHIB.Contains(entity))
+                {
+                    cache.RHIB.Add(entity);
+                    return True;
+                }
             }
             else if (trackMiniCopter && entity is MiniCopter)
             {
-                return cache.MiniCopter.Add(entity);
+                if (cache.MiniCopter.Contains(entity))
+                {
+                    cache.MiniCopter.Add(entity);
+                    return True;
+                }
             }
             else if (trackBoats && entity is BaseBoat)
             {
-                return cache.Boats.Add(entity);
+                if (!cache.Boats.Contains(entity))
+                {
+                    cache.Boats.Add(entity);
+                    return True;
+                }
             }
             else if (trackCH47 && entity is CH47Helicopter)
             {
-                return cache.CH47.Add(entity);
+                if (!cache.CH47.Contains(entity))
+                {
+                    cache.CH47.Add(entity);
+                    return True;
+                }
             }
             if (trackCargoShips && entity is CargoShip)
             {
-                return cache.CargoShips.Add(entity);
+                if (!cache.CargoShips.Contains(entity))
+                {
+                    cache.CargoShips.Add(entity);
+                    return True;
+                }
             }
             else if (trackCars && entity is BaseCar)
             {
-                return cache.Cars.Add(entity);
+                if (!cache.Cars.Contains(entity))
+                {
+                    cache.Cars.Add(entity);
+                    return True;
+                }
             }
             else if (trackTurrets && entity is AutoTurret)
             {
-                return cache.Turrets.Add(entity as AutoTurret);
+                if (!cache.Turrets.Contains(entity as AutoTurret))
+                {
+                    cache.Turrets.Add(entity as AutoTurret);
+                    return True;
+                }
             }
 
             return False;
@@ -2169,6 +2484,8 @@ namespace Oxide.Plugins
                 cache.MiniCopter.Remove(entity);
             else if (entity is CargoPlane)
                 cache.CargoPlanes.Remove(entity);
+            else if (entity is CCTV_RC)
+                cache.CCTV.Remove(entity as CCTV_RC);
         }
 
         private bool HasAccess(BasePlayer player)
@@ -2244,7 +2561,7 @@ namespace Oxide.Plugins
 
                             if (!hasDrops)
                             {
-                                player.ChatMessage(msg("NoDrops", player.UserIDString, lootDistance));
+                                Message(player, msg("NoDrops", player.UserIDString, lootDistance));
                             }
                         }
                         return;
@@ -2255,7 +2572,7 @@ namespace Oxide.Plugins
                             else
                                 storedData.OnlineBoxes.Add(player.UserIDString);
 
-                            player.ChatMessage(msg(storedData.OnlineBoxes.Contains(player.UserIDString) ? "BoxesOnlineOnly" : "BoxesAll", player.UserIDString));
+                            Message(player, msg(storedData.OnlineBoxes.Contains(player.UserIDString) ? "BoxesOnlineOnly" : "BoxesAll", player.UserIDString));
                         }
                         return;
                     case "vision":
@@ -2265,7 +2582,7 @@ namespace Oxide.Plugins
                             else
                                 storedData.Visions.Add(player.UserIDString);
 
-                            player.ChatMessage(msg(storedData.Visions.Contains(player.UserIDString) ? "VisionOn" : "VisionOff", player.UserIDString));
+                            Message(player, msg(storedData.Visions.Contains(player.UserIDString) ? "VisionOn" : "VisionOff", player.UserIDString));
                         }
                         return;
                     case "ext":
@@ -2277,7 +2594,7 @@ namespace Oxide.Plugins
                             else
                                 storedData.Extended.Add(player.UserIDString);
 
-                            player.ChatMessage(msg(storedData.Extended.Contains(player.UserIDString) ? "ExtendedPlayersOn" : "ExtendedPlayersOff", player.UserIDString));
+                            Message(player, msg(storedData.Extended.Contains(player.UserIDString) ? "ExtendedPlayersOn" : "ExtendedPlayersOff", player.UserIDString));
                         }
                         return;
                 }
@@ -2319,7 +2636,7 @@ namespace Oxide.Plugins
                         }
                     }
 
-                    player.ChatMessage(anchorMin);
+                    Message(player, anchorMin);
                     return;
                 }
                 if (args[0] == "setanchormax" && args.Length >= 1)
@@ -2338,7 +2655,7 @@ namespace Oxide.Plugins
                         }
                     }
 
-                    player.ChatMessage(anchorMax);
+                    Message(player, anchorMax);
                     return;
                 }
                 if (args[0] == "anchors_save")
@@ -2346,7 +2663,7 @@ namespace Oxide.Plugins
                     Config.Set("GUI", "Anchor Min", anchorMin);
                     Config.Set("GUI", "Anchor Max", anchorMax);
                     Config.Save();
-                    player.ChatMessage($"Saved: {anchorMin} {anchorMax}");
+                    Message(player, $"Saved: {anchorMin} {anchorMax}");
                     return;
                 }
                 if (args[0] == "anchors_reset")
@@ -2356,25 +2673,25 @@ namespace Oxide.Plugins
                     Config.Set("GUI", "Anchor Min", anchorMin);
                     Config.Set("GUI", "Anchor Max", anchorMax);
                     Config.Save();
-                    player.ChatMessage($"Reset: {anchorMin} {anchorMax}");
+                    Message(player, $"Reset: {anchorMin} {anchorMax}");
                     return;
                 }
                 if (args[0] == "tracker")
                 {
-                    player.ChatMessage("Feature removed. Use Player Tracker plugin.");
+                    Message(player, "Feature removed. Use Player Tracker plugin.");
                     return;
                 }
                 if (args[0] == "help")
                 {
-                    player.ChatMessage(msg("Help1", player.UserIDString, string.Join(", ", GetButtonNames, "HT")));
-                    player.ChatMessage(msg("Help2", player.UserIDString, command, "online"));
-                    player.ChatMessage(msg("Help3", player.UserIDString, command, "ui"));
-                    player.ChatMessage(msg("Help7", player.UserIDString, command, "vision"));
-                    player.ChatMessage(msg("Help8", player.UserIDString, command, "ext"));
-                    player.ChatMessage(msg("Help9", player.UserIDString, command, lootDistance));
-                    player.ChatMessage(msg("Help5", player.UserIDString, command));
-                    player.ChatMessage(msg("Help6", player.UserIDString, command));
-                    player.ChatMessage(msg("PreviousFilter", player.UserIDString, command));
+                    Message(player, msg("Help1", player.UserIDString, string.Join(", ", GetButtonNames, "HT")));
+                    Message(player, msg("Help2", player.UserIDString, command, "online"));
+                    Message(player, msg("Help3", player.UserIDString, command, "ui"));
+                    Message(player, msg("Help7", player.UserIDString, command, "vision"));
+                    Message(player, msg("Help8", player.UserIDString, command, "ext"));
+                    Message(player, msg("Help9", player.UserIDString, command, lootDistance));
+                    Message(player, msg("Help5", player.UserIDString, command));
+                    Message(player, msg("Help6", player.UserIDString, command));
+                    Message(player, msg("PreviousFilter", player.UserIDString, command));
                     return;
                 }
 
@@ -2386,12 +2703,12 @@ namespace Oxide.Plugins
                     if (storedData.Hidden.Contains(player.UserIDString))
                     {
                         storedData.Hidden.Remove(player.UserIDString);
-                        player.ChatMessage(msg("GUIShown", player.UserIDString));
+                        Message(player, msg("GUIShown", player.UserIDString));
                     }
                     else
                     {
                         storedData.Hidden.Add(player.UserIDString);
-                        player.ChatMessage(msg("GUIHidden", player.UserIDString));
+                        Message(player, msg("GUIHidden", player.UserIDString));
                     }
 
                     args = storedData.Filters[player.UserIDString].ToArray();
@@ -2410,7 +2727,7 @@ namespace Oxide.Plugins
                         sb.Length -= 2;
                     }
 
-                    player.ChatMessage(activeRadars.Count == 0 ? msg("NoActiveRadars", player.UserIDString) : msg("ActiveRadars", player.UserIDString, sb.ToString()));
+                    Message(player, activeRadars.Count == 0 ? msg("NoActiveRadars", player.UserIDString) : msg("ActiveRadars", player.UserIDString, sb.ToString()));
                     return;
                 }
                 else if (args[0] == "f")
@@ -2440,7 +2757,7 @@ namespace Oxide.Plugins
 
                         if (cooldown > 0)
                         {
-                            player.ChatMessage(msg("WaitCooldown", player.UserIDString, cooldown));
+                            Message(player, msg("WaitCooldown", player.UserIDString, cooldown));
                             return;
                         }
                         else cooldowns.Remove(player.userID);
@@ -2479,6 +2796,7 @@ namespace Oxide.Plugins
             radar.showCargoPlanes = isArg(args, "cargoplane") || showAll || (!uiBtnCargoPlanes && trackCargoPlanes);
             radar.showCargoShips = isArg(args, "cargoship") || showAll || (!uiBtnCargoShips && trackCargoShips);
             radar.showCars = isArg(args, "cars") || showAll || (!uiBtnCars && trackCars);
+            radar.showCCTV = isArg(args, "cctv") || showAll || (!uiBtnCCTV && trackCCTV);
             radar.showCH47 = isArg(args, "ch47") || showAll || (!uiBtnCH47 && trackCH47);
             radar.showCollectible = isArg(args, "col") || showAll;
             radar.showDead = isArg(args, "dead") || showAll;
@@ -2516,7 +2834,7 @@ namespace Oxide.Plugins
             if (command == "espgui")
                 return;
 
-            player.ChatMessage(msg("Activated", player.UserIDString, invokeTime, maxDistance, command));
+            Message(player, msg("Activated", player.UserIDString, invokeTime, maxDistance, command));
         }
 
         private bool isArg(string[] args, string arg, bool equalTo = False)
@@ -2626,6 +2944,7 @@ namespace Oxide.Plugins
                     if (uiBtnCargoPlanes) list.Add("CargoPlanes");
                     if (uiBtnCargoShips) list.Add("CargoShips");
                     if (uiBtnCars) list.Add("Cars");
+                    if (uiBtnCCTV) list.Add("CCTV");
                     if (uiBtnCH47) list.Add("CH47");
                     if (uiBtnCollectible) list.Add("Collectibles");
                     if (uiBtnDead) list.Add("Dead");
@@ -2776,11 +3095,10 @@ namespace Oxide.Plugins
         private static float rhDistance;
         private static float lootDistance;
         private static float colDistance;
+        private static float cctvDistance;
         private static float bagDistance;
         private static float npcDistance;
         private static float turretDistance;
-        private static float latencyMs;
-        private static int objectsLimit;
         private static bool showLootContents;
         private static bool showAirdropContents;
         private static bool showStashContents;
@@ -2837,6 +3155,7 @@ namespace Oxide.Plugins
         private static bool trackBags = True;
         private static bool trackBox = True;
         private static bool trackCollectibles = True;
+        private static bool trackCCTV = True;
         private static bool trackDead = True;
         private static bool trackLoot = True;
         private static bool trackNPC = True;
@@ -2867,6 +3186,7 @@ namespace Oxide.Plugins
         private static bool uiBtnBox;
         private static bool uiBtnBradley;
         private static bool uiBtnCars;
+        private static bool uiBtnCCTV;
         private static bool uiBtnCargoPlanes;
         private static bool uiBtnCargoShips;
         private static bool uiBtnCH47;
@@ -2979,18 +3299,6 @@ namespace Oxide.Plugins
             }
         }
 
-        private Dictionary<string, string> hexColors = new Dictionary<string, string>
-        {
-            ["<color=blue>"] = "<color=#0000FF>",
-            ["<color=red>"] = "<color=#FF0000>",
-            ["<color=yellow>"] = "<color=#FFFF00>",
-            ["<color=lightblue>"] = "<color=#ADD8E6>",
-            ["<color=orange>"] = "<color=#FFA500>",
-            ["<color=silver>"] = "<color=#C0C0C0>",
-            ["<color=magenta>"] = "<color=#FF00FF>",
-            ["<color=green>"] = "<color=#008000>",
-        };
-
         protected override void LoadDefaultMessages()
         {
             lang.RegisterMessages(new Dictionary<string, string>
@@ -2999,7 +3307,6 @@ namespace Oxide.Plugins
                 ["PreviousFilter"] = "To use your previous filter type <color=#FFA500>/{0} f</color>",
                 ["Activated"] = "ESP Activated - {0}s refresh - {1}m distance. Use <color=#FFA500>/{2} help</color> for help.",
                 ["Deactivated"] = "ESP Deactivated.",
-                ["DoESP"] = "DoESP() took {0}ms (max: {1}ms) to execute!",
                 ["Exception"] = "ESP Tool: An error occured. Please check the server console.",
                 ["GUIShown"] = "GUI will be shown",
                 ["GUIHidden"] = "GUI will now be hidden",
@@ -3071,8 +3378,8 @@ namespace Oxide.Plugins
             authLevel = authorized.Count == 0 ? Convert.ToInt32(GetConfig("Settings", "Restrict Access To Auth Level", 1)) : int.MaxValue;
             defaultMaxDistance = Convert.ToSingle(GetConfig("Settings", "Default Distance", 500.0));
             defaultInvokeTime = Convert.ToSingle(GetConfig("Settings", "Default Refresh Time", 5.0));
-            latencyMs = Convert.ToInt32(GetConfig("Settings", "Latency Cap In Milliseconds (0 = no cap)", 1000.0));
-            objectsLimit = Convert.ToInt32(GetConfig("Settings", "Objects Drawn Limit (0 = unlimited)", 250));
+            //latencyMs = Convert.ToInt32(GetConfig("Settings", "Latency Cap In Milliseconds (0 = no cap)", 1000.0));
+            //objectsLimit = Convert.ToInt32(GetConfig("Settings", "Objects Drawn Limit (0 = unlimited)", 250));
             var exceptions = GetConfig("Settings", "Dropped Item Exceptions", ItemExceptions) as List<object>;
 
             foreach (var exception in exceptions)
@@ -3120,6 +3427,7 @@ namespace Oxide.Plugins
             bagDistance = Convert.ToSingle(GetConfig("Drawing Distances", "Sleeping Bags", 250));
             boxDistance = Convert.ToSingle(GetConfig("Drawing Distances", "Boxes", 100));
             colDistance = Convert.ToSingle(GetConfig("Drawing Distances", "Collectibles", 100));
+            cctvDistance = Convert.ToSingle(GetConfig("Drawing Distances", "CCTV", 500));
             corpseDistance = Convert.ToSingle(GetConfig("Drawing Distances", "Player Corpses", 200));
             playerDistance = Convert.ToSingle(GetConfig("Drawing Distances", "Players", 500));
             npcPlayerDistance = Convert.ToSingle(GetConfig("Drawing Distances", "NPC Players", 300));
@@ -3142,6 +3450,7 @@ namespace Oxide.Plugins
             trackRidableHorses = Convert.ToBoolean(GetConfig("Additional Tracking", "Ridable Horses", False));
             trackRigidHullInflatableBoats = Convert.ToBoolean(GetConfig("Additional Tracking", "RHIB", False));
             trackBoats = Convert.ToBoolean(GetConfig("Additional Tracking", "Boats", False));
+            trackCCTV = Convert.ToBoolean(GetConfig("Additional Tracking", "CCTV", False));
 
             colorDrawArrows = Convert.ToString(GetConfig("Color-Hex Codes", "Player Arrows", "#000000"));
             distCC = Convert.ToString(GetConfig("Color-Hex Codes", "Distance", "#ffa500"));
@@ -3179,8 +3488,9 @@ namespace Oxide.Plugins
             uiBtnBradley = Convert.ToBoolean(GetConfig("GUI", "Show Button - Bradley", False));
             uiBtnBox = Convert.ToBoolean(GetConfig("GUI", "Show Button - Box", True));
             uiBtnCars = Convert.ToBoolean(GetConfig("GUI", "Show Button - Cars", False));
+            uiBtnCCTV = Convert.ToBoolean(GetConfig("GUI", "Show Button - CCTV", True));
             uiBtnCargoPlanes = Convert.ToBoolean(GetConfig("GUI", "Show Button - CargoPlanes", False));
-            uiBtnCargoShips = Convert.ToBoolean(GetConfig("GUI", "Show Button - CargoShips", false));
+            uiBtnCargoShips = Convert.ToBoolean(GetConfig("GUI", "Show Button - CargoShips", False));
             uiBtnCH47 = Convert.ToBoolean(GetConfig("GUI", "Show Button - CH47", False));
             uiBtnCollectible = Convert.ToBoolean(GetConfig("GUI", "Show Button - Collectibles", True));
             uiBtnDead = Convert.ToBoolean(GetConfig("GUI", "Show Button - Dead", True));
@@ -3202,6 +3512,7 @@ namespace Oxide.Plugins
             if (uiBtnBoats) trackBoats = True;
             if (uiBtnBradley) trackBradley = True;
             if (uiBtnCars) trackCars = True;
+            if (uiBtnCCTV) trackCCTV = True;
             if (uiBtnCargoPlanes) trackCargoPlanes = True;
             if (uiBtnCargoShips) trackCargoShips = True;
             if (uiBtnCH47) trackCH47 = True;
@@ -3274,17 +3585,9 @@ namespace Oxide.Plugins
 
         private string msg(string key, string id = null, params object[] args)
         {
-            var sb = new StringBuilder(id == null ? RemoveFormatting(lang.GetMessage(key, this, id)) : lang.GetMessage(key, this, id));
+            var message = id == null || id == "server_console" ? RemoveFormatting(lang.GetMessage(key, this, id)) : lang.GetMessage(key, this, id);
 
-            foreach (var entry in hexColors)
-            {
-                if (sb.ToString().Contains(entry.Key))
-                {
-                    sb.Replace(entry.Key, entry.Value);
-                }
-            }
-
-            return args.Length > 0 ? string.Format(sb.ToString(), args) : sb.ToString();
+            return args.Length > 0 ? string.Format(message, args) : message;
         }
 
         private string RemoveFormatting(string source)
@@ -3292,6 +3595,14 @@ namespace Oxide.Plugins
             return source.Contains(">") ? Regex.Replace(source, "<.*?>", string.Empty) : source;
         }
 
-#endregion
+        private static void Message(BasePlayer target, string message)
+        {
+            if (target.IsValid())
+            {
+                ins.Player.Message(target, message, 0uL);
+            }
+        }
+
+        #endregion
     }
 }

@@ -17,9 +17,27 @@ using System.Text;
 using System.Text.RegularExpressions;
 using UnityEngine;
 
+/*
+https://umod.org/community/admin-radar/47629-radar-not-on-by-defaultconnect?page=1#post-6
+https://umod.org/community/admin-radar/49053-some-sleepers-dont-show
+https://umod.org/community/admin-radar/49678-admin-radar-bugged
+https://umod.org/community/admin-radar/49680-idea-scale-font-size-by-distance
+https://umod.org/community/admin-radar/49900-player-stashes-not-showing-only-those-from-stashtraps
+
+Fix for Rust update (REQUIRES RUST UPDATE TO COMPILE)
+Added localization for Spain (es)
+TrainCarUnloadable added to loot filter but I don't think it works yet
+Added few null checks to drawing methods
+Added a few null checks to backpacks
+Added missing Group Limit -> Limit check
+Changed tugboat from RB to TB in Boats filter
+Added message for amount found to /radar buildings
+Changed /radar drops to show item shortname if available
+*/
+
 namespace Oxide.Plugins
 {
-    [Info("Admin Radar", "nivex", "5.3.1")]
+    [Info("Admin Radar", "nivex", "5.3.2")]
     [Description("Radar tool for Admins and Developers.")]
     internal class AdminRadar : RustPlugin
     {
@@ -155,6 +173,10 @@ namespace Oxide.Plugins
                 {
                     return True;
                 }
+                if (config.Core.Loot && entity is TrainCarUnloadable && Add_Internal<StorageContainer, EntityInfo>(Containers, (entity as TrainCarUnloadable).GetStorageContainer(), EntityType.Loot))
+                {
+                    return True;
+                }
                 if ((config.Core.Loot || config.Core.Box) && entity is StorageContainer && TryGetContainerType(entity, out entityType) && Add_Internal<StorageContainer, EntityInfo>(Containers, entity, entityType))
                 {
                     return True;
@@ -195,7 +217,7 @@ namespace Oxide.Plugins
                 {
                     return True;
                 }
-                if (config.Additional.Heli && Add_Internal<BaseHelicopter, EntityInfo>(Helicopters, entity, EntityType.Heli))
+                if (config.Additional.Heli && Add_Internal<PatrolHelicopter, EntityInfo>(Helicopters, entity, EntityType.Heli))
                 {
                     return True;
                 }
@@ -211,7 +233,7 @@ namespace Oxide.Plugins
                 {
                     return True;
                 }
-                if (config.Additional.MC && Add_Internal<MiniCopter, EntityInfo>(MiniCopter, entity, EntityType.Mini))
+                if (config.Additional.MC && Add_Internal<Minicopter, EntityInfo>(MiniCopter, entity, EntityType.Mini))
                 {
                     return True;
                 }
@@ -332,7 +354,7 @@ namespace Oxide.Plugins
             {
                 if (config.Core.Loot)
                 {
-                    return entity.ShortPrefabName == "campfire"
+                    return entity is TrainCarUnloadable || entity.ShortPrefabName == "campfire"
                             || entity.ShortPrefabName.Contains("loot", CompareOptions.IgnoreCase)
                             || entity.ShortPrefabName.Contains("crate_", CompareOptions.IgnoreCase)
                             || entity.ShortPrefabName.Contains("trash", CompareOptions.IgnoreCase)
@@ -979,6 +1001,7 @@ namespace Oxide.Plugins
             {
                 if (config.Methods.Arrow || @override)
                 {
+                    if (player == null || !player.IsConnected) { return; }
                     player.SendConsoleCommand("ddraw.arrow", delay, color, from, to, size);
                 }
             }
@@ -987,6 +1010,7 @@ namespace Oxide.Plugins
             {
                 if (config.Methods.Text || @override)
                 {
+                    if (player == null || !player.IsConnected) { return; }
                     player.SendConsoleCommand("ddraw.text", delay, color, position, Format(prefix, text, false));
                 }
             }
@@ -995,6 +1019,7 @@ namespace Oxide.Plugins
             {
                 if (config.Methods.Box || @override)
                 {
+                    if (player == null || !player.IsConnected) { return; }
                     player.SendConsoleCommand("ddraw.box", delay, color, position, size);
                 }
             }
@@ -1505,12 +1530,19 @@ namespace Oxide.Plugins
 
                             if (distant.Remove(target))
                             {
-                                if (k++ == 0 && drawAtOffset)
+                                if (group.Count >= config.Limit.Amount)
                                 {
-                                    DrawPlayerText(Color.black, target.pos + limitUp, group.Count, string.Empty, True);
-                                }
+                                    if (k++ == 0 && drawAtOffset)
+                                    {
+                                        DrawPlayerText(Color.black, target.pos + limitUp, group.Count, string.Empty, True);
+                                    }
 
-                                DrawPlayerText(target.alive ? alive : dead, target.pos, "X", string.Empty, True);
+                                    DrawPlayerText(target.alive ? alive : dead, target.pos, "X", string.Empty, True);
+                                }
+                                else
+                                {
+                                    DrawPlayerText(target.alive ? Color.green : dead, target.pos, "X", string.Empty, True);
+                                }
 
                                 Pool.Free(ref target);
 
@@ -1526,7 +1558,7 @@ namespace Oxide.Plugins
 
                     for (j = 0; j < distant.Count; ++j)
                     {
-                        DrawPlayerText(distant[j].alive ? Color.green : Color.red, distant[j].pos, "X", string.Empty, True);
+                        DrawPlayerText(distant[j].alive ? Color.green : dead, distant[j].pos, "X", string.Empty, True);
                     }
                 }
                 catch (Exception ex)
@@ -1595,7 +1627,7 @@ namespace Oxide.Plugins
                         var obj = SetDataObject(ei);
                         var color = __(config.Hex.Heli);
                         var name = instance.m("H", userid);
-                        var weakspots = (ei.entity as BaseHelicopter).weakspots;
+                        var weakspots = (ei.entity as PatrolHelicopter).weakspots;
 
                         CacheText(obj, color, twoUp, () =>
                         {
@@ -1857,6 +1889,7 @@ namespace Oxide.Plugins
 
                         CacheText(obj, color, halfUp, () =>
                         {
+                            if (ei == null || backpack == null || backpack.inventory == null || backpack.inventory.itemList == null) return;
                             string prefix = string.IsNullOrEmpty(backpack._playerName) ? instance.m("backpack", userid) : backpack._playerName;
                             ei.info = Format(prefix, $"{GetContents(backpack.inventory.itemList, config.Options.BackpackContentAmount)}<color={config.Hex.Dist}>{Distance(ei.from)}</color>");
                         });
@@ -2308,7 +2341,7 @@ namespace Oxide.Plugins
                         if (!config.Additional.CH47 && !config.GUI.CH47) return;
                     }
 
-                    entityName = instance.m(ei.entity is ScrapTransportHelicopter ? "STH" : ei.entity is BaseSubmarine ? "SUB" : ei.entity is BaseBoat ? "RB" : string.Concat(entityName.Where(char.IsUpper)), userid);
+                    entityName = instance.m(ei.entity is ScrapTransportHelicopter ? "STH" : ei.entity is BaseSubmarine ? "SUB" : ei.entity is Tugboat ? "TB" : ei.entity is BaseBoat ? "RB" : string.Concat(entityName.Where(char.IsUpper)), userid);
                     var color = __(ei.entity is ScrapTransportHelicopter ? config.Hex.STH : config.Hex.Get(entityType));
                     var obj = SetDataObject(ei);
 
@@ -2462,7 +2495,8 @@ namespace Oxide.Plugins
                 Func<BaseEntity, EntityInfo> getCachedInfo = entity =>
                 {
                     var type = cache.IsLoot(entity) ? EntityType.Loot : entity is StashContainer ? EntityType.Stash : EntityType.Box;
-                    return new EntityInfo(entity, type, config.Distance.Get, StripTags);
+                    var unloadable = (entity as TrainCarUnloadable)?.GetStorageContainer();
+                    return new EntityInfo(unloadable ?? entity, type, config.Distance.Get, StripTags);
                 };
 
                 Func<BaseEntity, bool> condition = entity =>
@@ -2520,7 +2554,7 @@ namespace Oxide.Plugins
 
             if (config.Additional.Heli)
             {
-                yield return CreateCoroutine(AddElementsToCache<BaseHelicopter>(_coroutineTimer, cache.Helicopters, EntityType.Heli));
+                yield return CreateCoroutine(AddElementsToCache<PatrolHelicopter>(_coroutineTimer, cache.Helicopters, EntityType.Heli));
                 cached += cache.Helicopters.Count;
             }
 
@@ -2545,7 +2579,7 @@ namespace Oxide.Plugins
 
             if (config.Additional.MC)
             {
-                yield return CreateCoroutine(AddElementsToCache<MiniCopter>(_coroutineTimer, cache.MiniCopter, EntityType.Mini));
+                yield return CreateCoroutine(AddElementsToCache<Minicopter>(_coroutineTimer, cache.MiniCopter, EntityType.Mini));
                 yield return CreateCoroutine(AddElementsToCache<Drone>(_coroutineTimer, cache.MiniCopter, EntityType.Mini));
                 cached += cache.MiniCopter.Count;
             }
@@ -3492,13 +3526,17 @@ namespace Oxide.Plugins
                     break;
                 }
             }
-            AdminCommand(player, () =>
+            if (objects.Count > 0)
             {
-                foreach (var obj in objects)
+                AdminCommand(player, () =>
                 {
-                    player.SendConsoleCommand("ddraw.text", config.Options.BuildingsDrawTime, Color.red, obj[0], obj[1]);
-                }
-            });
+                    foreach (var obj in objects)
+                    {
+                        player.SendConsoleCommand("ddraw.text", config.Options.BuildingsDrawTime, Color.red, obj[0], obj[1]);
+                    }
+                });
+            }
+            Message(player, "ProcessRequestFinished", objects.Count);
             Pool.FreeList(ref objects);
         }
 
@@ -3584,7 +3622,8 @@ namespace Oxide.Plugins
                     var currDistance = Mathf.CeilToInt(Vector3.Distance(entity.transform.position, player.transform.position));
                     if (currDistance <= config.Distance.Drops)
                     {
-                        objects.Add(new object[2] { entity.transform.position, $"{entity.ShortPrefabName} <color=#FFFF00>{currDistance}</color>" });
+                        var shortname = entity is DroppedItem ? (entity as DroppedItem)?.item?.info.shortname ?? entity.ShortPrefabName : entity.ShortPrefabName;
+                        objects.Add(new object[2] { entity.transform.position, $"{shortname} <color=#FFFF00>{currDistance}</color>" });
                     }
                 }
                 if (++checks % 200 == 0)
@@ -4000,6 +4039,84 @@ namespace Oxide.Plugins
                 ["M92P"] = "M92",
                 ["M39P"] = "M39",
             }, this, "en");
+
+            lang.RegisterMessages(new Dictionary<string, string>
+            {
+                ["NotAllowed"] = "No tienes permitido usar este comando.",
+                ["PreviousFilter"] = "Para usar tu filtro anterior, escribe <color=#FFA500>/{0} f</color>",
+                ["Activated"] = "ESP Activado - Actualización cada {0}s - Distancia {1}m. Usa <color=#FFA500>/{2} help</color> para obtener ayuda.",
+                ["Deactivated"] = "ESP Desactivado.",
+                ["Exception"] = "Herramienta ESP: Se produjo un error. Por favor, revisa la consola del servidor.",
+                ["GUIShown"] = "Se mostrará la interfaz gráfica",
+                ["GUIHidden"] = "La interfaz gráfica ahora estará oculta",
+                ["InvalidID"] = "{0} no es una ID de Steam válida. Entrada eliminada.",
+                ["BoxesAll"] = "Mostrando todas las cajas ahora.",
+                ["BoxesOnlineOnly"] = "Mostrando solo cajas de jugadores en línea ahora.",
+                ["Help1"] = "<color=#FFA500>Filtros disponibles</color>: {0}",
+                ["Help2"] = "<color=#FFA500>/{0} {1}</color> - Alterna mostrar solo las cajas de jugadores en línea cuando se usa el filtro <color=#FF0000>box</color>.",
+                ["Help3"] = "<color=#FFA500>/{0} {1}</color> - Activa o desactiva rápidamente la interfaz de alternancia.",
+                ["Help5"] = "p. ej.: <color=#FFA500>/{0} 1 1000 box loot stash</color>",
+                ["Help6"] = "p. ej.: <color=#FFA500>/{0} 0.5 400 all</color>",
+                ["VisionOn"] = "Ahora podrás ver hacia dónde miran los jugadores.",
+                ["VisionOff"] = "Ya no podrás ver hacia dónde miran los jugadores.",
+                ["ExtendedPlayersOn"] = "La información extendida de los jugadores está activada ahora.",
+                ["ExtendedPlayersOff"] = "La información extendida de los jugadores está desactivada ahora.",
+                ["Help7"] = "<color=#FFA500>/{0} {1}</color> - Alterna mostrar hacia dónde miran los jugadores.",
+                ["Help8"] = "<color=#FFA500>/{0} {1}</color> - Alterna la información extendida de los jugadores.",
+                ["backpack"] = "mochila",
+                ["scientist"] = "científico",
+                ["Help9"] = "<color=#FFA500>/{0} drops</color> - Muestra todos los objetos caídos dentro de {1}m.",
+                ["NoActiveRadars"] = "Nadie está utilizando el Radar en este momento.",
+                ["ActiveRadars"] = "Usuarios de radar activos: {0}",
+                ["All"] = "Todos",
+                ["Bags"] = "Bolsas",
+                ["Box"] = "Caja",
+                ["Collectibles"] = "Objetos coleccionables",
+                ["Dead"] = "Muertos",
+                ["Loot"] = "Botín",
+                ["Ore"] = "Minerales",
+                ["Sleepers"] = "Durmientes",
+                ["Stash"] = "Escondite",
+                ["TC"] = "TC",
+                ["Turrets"] = "Torretas",
+                ["Bear"] = "Oso",
+                ["Boar"] = "Jabalí",
+                ["Chicken"] = "Pollo",
+                ["Wolf"] = "Lobo",
+                ["Stag"] = "Ciervo",
+                ["Horse"] = "Caballo",
+                ["My Base"] = "Mi Base",
+                ["scarecrow"] = "espantapájaros",
+                ["murderer"] = "asesino",
+                ["WaitCooldown"] = "Debes esperar {0} segundos para usar este comando nuevamente.",
+                ["missionprovider_stables_a"] = "misiones",
+                ["missionprovider_stables_b"] = "misiones",
+                ["missionprovider_outpost_a"] = "misiones",
+                ["missionprovider_outpost_b"] = "misiones",
+                ["missionprovider_fishing_a"] = "misiones",
+                ["missionprovider_fishing_b"] = "misiones",
+                ["missionprovider_bandit_a"] = "misiones",
+                ["missionprovider_bandit_b"] = "misiones",
+                ["simpleshark"] = "tiburón",
+                ["stables_shopkeeper"] = "dependiente",
+                ["npc_underwaterdweller"] = "morador",
+                ["boat_shopkeeper"] = "dependiente",
+                ["bandit_shopkeeper"] = "dependiente",
+                ["outpost_shopkeeper"] = "dependiente",
+                ["npc_bandit_guard"] = "guardia",
+                ["bandit_conversationalist"] = "vendedor",
+                ["npc_tunneldweller"] = "morador",
+                ["ProcessRequest"] = "Procesando la solicitud; esto llevará varios segundos...",
+                ["ProcessRequestFinished"] = "Se encontraron {0} entidades.",
+                ["Radar UI Help"] = "Puedes alternar el botón de movimiento/restablecer la interfaz usando: {0}",
+                ["AT"] = "AT",
+                ["bag"] = "bolsa",
+                ["LR300AR"] = "LR300",
+                ["AR"] = "AK47",
+                ["ARICE"] = "AK47",
+                ["M92P"] = "M92",
+                ["M39P"] = "M39",
+            }, this, "es");
         }
 
         public class ConfigurationSettings

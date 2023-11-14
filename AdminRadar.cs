@@ -17,27 +17,9 @@ using System.Text;
 using System.Text.RegularExpressions;
 using UnityEngine;
 
-/*
-https://umod.org/community/admin-radar/47629-radar-not-on-by-defaultconnect?page=1#post-6
-https://umod.org/community/admin-radar/49053-some-sleepers-dont-show
-https://umod.org/community/admin-radar/49678-admin-radar-bugged
-https://umod.org/community/admin-radar/49680-idea-scale-font-size-by-distance
-https://umod.org/community/admin-radar/49900-player-stashes-not-showing-only-those-from-stashtraps
-
-Fix for Rust update (REQUIRES RUST UPDATE TO COMPILE)
-Added localization for Spain (es)
-TrainCarUnloadable added to loot filter but I don't think it works yet
-Added few null checks to drawing methods
-Added a few null checks to backpacks
-Added missing Group Limit -> Limit check
-Changed tugboat from RB to TB in Boats filter
-Added message for amount found to /radar buildings
-Changed /radar drops to show item shortname if available
-*/
-
 namespace Oxide.Plugins
 {
-    [Info("Admin Radar", "nivex", "5.3.2")]
+    [Info("Admin Radar", "nivex", "5.3.3")]
     [Description("Radar tool for Admins and Developers.")]
     internal class AdminRadar : RustPlugin
     {
@@ -296,7 +278,7 @@ namespace Oxide.Plugins
 
             private bool Add_Internal<TLookFor, TTargetType>(Dictionary<NetworkableId, EntityInfo> cachedList, BaseEntity entity, EntityType type)
             {
-                if (entity is TLookFor && entity.net != null && !cachedList.ContainsKey(entity.net.ID))
+                if (entity is TLookFor && entity.net != null && !entity.IsDestroyed && !cachedList.ContainsKey(entity.net.ID))
                 {
                     var ei = new EntityInfo(entity, type, config.Distance.Get, instance.StripTags);
                     cachedList.Add(entity.net.ID, ei);
@@ -368,7 +350,8 @@ namespace Oxide.Plugins
             {
                 if (config.Core.Box)
                 {
-                    return entity.ShortPrefabName == "vendingmachine.deployed"
+                    return entity.ShortPrefabName.Contains("storage_barrel") 
+                            || entity.ShortPrefabName == "vendingmachine.deployed"
                             || entity.ShortPrefabName == "woodbox_deployed"
                             || entity.ShortPrefabName == "box.wooden.large"
                             || entity.ShortPrefabName == "dropbox.deployed"
@@ -555,6 +538,11 @@ namespace Oxide.Plugins
                 public DistantPlayer()
                 {
                 }
+                public void Reset()
+                {
+                    pos = default;
+                    alive = false;
+                }
             }
 
             internal bool setSource = True, canGetExistingBackpacks = True, isEnabled = True, canBypassOverride, hasPermAllowed, isAdmin, showHT, showAll;
@@ -628,6 +616,7 @@ namespace Oxide.Plugins
                     var obj = distant[i];
                     if (obj != null)
                     {
+                        obj.Reset();
                         Pool.Free(ref obj);
                     }
                     distant[i] = null;
@@ -638,6 +627,7 @@ namespace Oxide.Plugins
                     if (obj.Value != null)
                     {
                         var value = obj.Value;
+                        value.Reset();
                         Pool.Free(ref value);
                     }
                     data[obj.Key] = null;
@@ -906,8 +896,7 @@ namespace Oxide.Plugins
 
             public void RemoveByNetworkId(NetworkableId nid)
             {
-                DataObject obj;
-                if (data.TryGetValue(nid, out obj))
+                if (data.TryGetValue(nid, out var obj))
                 {
                     if (obj != null)
                     {
@@ -954,29 +943,36 @@ namespace Oxide.Plugins
                 }
             }
 
+            private DataObject cobj;
+            private DrawFlags cflag;
+
             private void DirectDrawAll()
             {
                 float delay = this.delay;
 
-                foreach (var obj in data.Values)
+                foreach (var pair in data)
                 {
-                    if (obj.disabled)
+                    cobj = pair.Value;
+                    if (cobj == null || cobj.ei == null || cobj.disabled)
                     {
                         continue;
                     }
-                    if (obj.HasFlag(DrawFlags.Arrow))
+                    cflag = DrawFlags.Arrow;
+                    if (cobj.HasFlag(DrawFlags.Arrow))
                     {
-                        player.SendConsoleCommand("ddraw.arrow", delay, obj.ei.color, obj.ei.from, obj.ei.to, obj.ei.size);
+                        player.SendConsoleCommand("ddraw.arrow", delay, cobj.ei.color, cobj.ei.from, cobj.ei.to, cobj.ei.size);
                     }
-                    if (obj.HasFlag(DrawFlags.Box))
+                    cflag = DrawFlags.Box;
+                    if (cobj.HasFlag(DrawFlags.Box))
                     {
-                        player.SendConsoleCommand("ddraw.box", delay, obj.ei.color, obj.ei.from, obj.ei.size);
+                        player.SendConsoleCommand("ddraw.box", delay, cobj.ei.color, cobj.ei.from, cobj.ei.size);
                     }
-                    if (obj.HasFlag(DrawFlags.Text))
+                    cflag = DrawFlags.Text;
+                    if (cobj.HasFlag(DrawFlags.Text))
                     {
-                        try { obj.action(); } catch (Exception ex) { if (HandleException(obj, ex)) continue; else break; }
-                        if (obj.ei.info == null) { continue; }
-                        player.SendConsoleCommand("ddraw.text", delay, obj.ei.color, obj.ei.from, obj.ei.info);
+                        try { cobj.action(); } catch (Exception ex) { HandleException(pair.Key, ex); continue; }
+                        if (cobj.ei.info == null) { continue; }
+                        player.SendConsoleCommand("ddraw.text", delay, cobj.ei.color, cobj.ei.from, cobj.ei.info);
                     }
                 }
             }
@@ -1061,11 +1057,15 @@ namespace Oxide.Plugins
                 }
             }
 
-            private bool HandleException(DataObject obj, Exception ex)
+            private void HandleException(NetworkableId nid, Exception ex)
             {
-                currType = obj.ei.type;
+                if (cobj != null)
+                {
+                    cobj.disabled = true;
+                    currType = cobj.ei.type;
+                }
+                removeByNetworkId.Add(nid);
                 HandleException(ex);
-                return player.IsAdmin;
             }
 
             private void HandleException(Exception ex)
@@ -1074,7 +1074,7 @@ namespace Oxide.Plugins
                 removeByEntityType.Add(currType);
                 instance._errorTypes.Add(currType);
                 instance.Message(player, "Exception");
-                instance.Puts("Error @{0}: {1}", currType, ex);
+                instance.Puts("Error @{0} ({1}): {2}", currType, cflag, ex);
                 RemoveByEntityType(currType);
             }
 
@@ -1416,7 +1416,7 @@ namespace Oxide.Plugins
                         }
                     }
                 }
-                if (config.Settings.AveragePingInterval > 0)
+                if (config.Settings.AveragePingInterval > 0 && target.IsConnected)
                 {
                     sb.Append($" {target.IPlayer?.Ping ?? -1}ms");
                 }
@@ -1428,13 +1428,11 @@ namespace Oxide.Plugins
                 {
                     sb.Append(config.Settings.NewText);
                 }
-                string clan;
-                if (instance._clanColors.TryGetValue(instance.GetClanOf(target.userID), out clan) && !config.Settings.ApplySameColor)
+                if (instance._clanColors.TryGetValue(instance.GetClanOf(target.userID), out var clan) && !config.Settings.ApplySameColor)
                 {
                     clan = $" <color={clan}>C</color>";
                 }
-                string team;
-                if (instance._teamColors.TryGetValue(target.currentTeam, out team) && !config.Settings.ApplySameColor)
+                if (instance._teamColors.TryGetValue(target.currentTeam, out var team) && !config.Settings.ApplySameColor)
                 {
                     team = $"<color={team}>T</color>";
                 }
@@ -1544,6 +1542,8 @@ namespace Oxide.Plugins
                                     DrawPlayerText(target.alive ? Color.green : dead, target.pos, "X", string.Empty, True);
                                 }
 
+                                target.Reset();
+
                                 Pool.Free(ref target);
 
                                 group[i] = null;
@@ -1572,7 +1572,11 @@ namespace Oxide.Plugins
                     for (i = distant.Count - 1; i >= 0; i--)
                     {
                         var obj = distant[i];
-                        Pool.Free(ref obj);
+                        if (obj != null)
+                        {
+                            obj.Reset();
+                            Pool.Free(ref obj);
+                        }
                         distant[i] = null;
                     }
 
@@ -2538,15 +2542,11 @@ namespace Oxide.Plugins
             {
                 foreach (BaseNetworkable entity in BaseNetworkable.serverEntities)
                 {
-                    if (entity is PlayerCorpse && !entity.IsDestroyed)
+                    if (entity is PlayerCorpse corpse && !corpse.IsDestroyed && corpse.playerSteamID.IsSteamId())
                     {
-                        PlayerCorpse corpse = entity as PlayerCorpse;
-                        if (corpse.playerSteamID.IsSteamId())
-                        {
-                            EntityInfo ei;
-                            cache.Corpses[corpse.net.ID] = ei = new EntityInfo(corpse, EntityType.Dead, config.Distance.Get);
-                            ei.name = corpse.parentEnt?.ToString() ?? corpse.playerSteamID.ToString();
-                        }
+                        EntityInfo ei;
+                        cache.Corpses[corpse.net.ID] = ei = new EntityInfo(corpse, EntityType.Dead, config.Distance.Get);
+                        ei.name = corpse.parentEnt?.ToString() ?? corpse.playerSteamID.ToString();
                     }
                 }
                 cached += cache.Corpses.Count;
@@ -2781,7 +2781,7 @@ namespace Oxide.Plugins
                 {
                     idsToRemove.Add(pair.Key);
                 }
-                else if (pair.Value is TLookFor && !cachedList.ContainsKey(pair.Key) && (condition == null || condition(pair.Value)))
+                else if (pair.Value is TLookFor && !pair.Value.IsDestroyed && !cachedList.ContainsKey(pair.Key) && (condition == null || condition(pair.Value)))
                 {
                     var ei = new EntityInfo(pair.Value, type, config.Distance.Get, StripTags);
                     cachedList.Add(pair.Key, ei);
@@ -3266,8 +3266,7 @@ namespace Oxide.Plugins
 
         private void OnPlayerVoice(BasePlayer player, byte[] data)
         {
-            Timer voice;
-            if (!_voices.TryGetValue(player.userID, out voice))
+            if (!_voices.TryGetValue(player.userID, out var voice))
             {
                 float max = config.Settings.DefaultInvokeTime;
 
@@ -3364,8 +3363,7 @@ namespace Oxide.Plugins
         {
             if (id.IsSteamId())
             {
-                RelationshipManager.PlayerTeam team;
-                if (!RelationshipManager.ServerInstance.playerToTeam.TryGetValue(id, out team))
+                if (!RelationshipManager.ServerInstance.playerToTeam.TryGetValue(id, out var team))
                 {
                     return null;
                 }
@@ -3383,8 +3381,7 @@ namespace Oxide.Plugins
 
         private string GetClanOf(ulong playerId)
         {
-            string clan;
-            if (!_clans.TryGetValue(playerId, out clan))
+            if (!_clans.TryGetValue(playerId, out var clan))
             {
                 _clans[playerId] = clan = Clans?.Call("GetClanOf", playerId) as string ?? string.Empty;
                 timer.Once(30f, () => _clans.Remove(playerId));
@@ -3714,7 +3711,7 @@ namespace Oxide.Plugins
             {
                 if (!player.IsDestroyed && !IsRadar(player.UserIDString))
                 {
-                    RadarCommandX(player, "radar", data.Filters.ContainsKey(player.UserIDString) ? data.Filters[player.UserIDString].ToArray() : new string[0]);
+                    RadarCommandX(player, "radar", data.Filters.ContainsKey(player.UserIDString) ? data.Filters[player.UserIDString].ToArray() : Array.Empty<string>());
                 }
             }, UnityEngine.Random.Range(0.1f, 1f));
         }

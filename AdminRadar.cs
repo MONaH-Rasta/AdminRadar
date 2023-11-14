@@ -25,9 +25,9 @@ using Random = UnityEngine.Random;
 
 namespace Oxide.Plugins
 {
-    [Info("Admin Radar", "nivex", "4.7.2")]
+    [Info("Admin Radar", "nivex", "4.7.3")]
     [Description("Radar tool for Admins and Developers.")]
-    public class AdminRadar : RustPlugin
+    class AdminRadar : RustPlugin
     {
         [PluginReference] private Plugin Vanish;
 
@@ -133,7 +133,7 @@ namespace Oxide.Plugins
             RidableHorses,
             RigidHullInflatableBoats,
             Sleepers,
-            Source,            
+            Source,
             Turrets,
             Zombies
         }
@@ -275,7 +275,7 @@ namespace Oxide.Plugins
                 player = GetComponent<BasePlayer>();
                 source = player;
                 position = player.transform.position;
-                
+
                 if (inactiveSeconds > 0f || inactiveMinutes > 0)
                     InvokeRepeating(Activity, 0f, 1f);
             }
@@ -475,7 +475,7 @@ namespace Oxide.Plugins
 
                     if (!ShowOre())
                         return;
-                    
+
                     if (!ShowEntity(EntityType.CH47Helicopters, showCH47, "CH47", cache.CH47))
                         return;
 
@@ -758,7 +758,7 @@ namespace Oxide.Plugins
                 }
 
                 var ping = pings[target.userID];
-                
+
                 if (ping.Time == 0f || Time.realtimeSinceStartup - ping.Time >= averagePingInterval)
                 {
                     ping.Time = Time.realtimeSinceStartup;
@@ -856,7 +856,7 @@ namespace Oxide.Plugins
 
                         string vanished = ins.Vanish != null && ins.Vanish.Call<bool>("IsInvisible", target) ? "<color=#FF00FF>V</color>" : string.Empty;
                         string health = showHT && target.metabolism != null ? string.Format("{0} <color=#FFA500>{1}</color>:<color=#FFADD8E6>{2}</color>", Math.Floor(target.health), target.metabolism.calories.value.ToString("#0"), target.metabolism.hydration.value.ToString("#0")) : Math.Floor(target.health).ToString("#0");
-                        
+
                         if (averagePingInterval > 0) extText += string.Format(" {0}ms", GetAveragePing(target));
                         if (ins.storedData.Visions.Contains(player.UserIDString)) DrawVision(player, target, invokeTime);
                         if (drawArrows) player.SendConsoleCommand("ddraw.arrow", invokeTime + flickerDelay, __(colorDrawArrows), target.transform.position + new Vector3(0f, target.transform.position.y + 10), target.transform.position, 1);
@@ -888,7 +888,7 @@ namespace Oxide.Plugins
                 entityType = EntityType.Sleepers;
                 double currDistance;
                 Color color;
-                
+
                 foreach (var sleeper in BasePlayer.sleepingPlayerList)
                 {
                     if (sleeper == null || sleeper.transform == null)
@@ -941,7 +941,7 @@ namespace Oxide.Plugins
 
                 entityType = EntityType.Heli;
                 double currDistance;
-                
+
                 if (cache.Helicopters.Count > 0)
                 {
                     foreach (var heli in cache.Helicopters)
@@ -969,7 +969,7 @@ namespace Oxide.Plugins
 
                 entityType = EntityType.Bradley;
                 double currDistance;
-                
+
                 if (cache.BradleyAPCs.Count > 0)
                 {
                     foreach (var bradley in cache.BradleyAPCs)
@@ -995,7 +995,7 @@ namespace Oxide.Plugins
                     return true;
 
                 entityType = EntityType.GroupLimitHightlighting;
-                
+
                 if (distantPlayers.Count > 0)
                 {
                     distantPlayers.RemoveAll(p => p == null || p.transform == null || !p.IsConnected);
@@ -1029,7 +1029,7 @@ namespace Oxide.Plugins
                                 }
                             }
                         }
-                        
+
                         if (players.Count >= groupLimit)
                         {
                             int index = 0;
@@ -1138,7 +1138,7 @@ namespace Oxide.Plugins
 
                 return LatencyAccepted();
             }
-                        
+
             private bool ShowContainers()
             {
                 if (!showBox && !showLoot && !showStash)
@@ -1231,7 +1231,7 @@ namespace Oxide.Plugins
 
                     if (ins.storedData.OnlineBoxes.Contains(player.UserIDString) && container.OwnerID.IsSteamId() && (container.name.Contains("box") || container.name.Contains("coffin")))
                     {
-                        var owner = BasePlayer.activePlayerList.Find(x => x.userID == container.OwnerID);
+                        var owner = BasePlayer.FindByID(container.OwnerID);
 
                         if (owner == null || !owner.IsConnected)
                         {
@@ -1377,7 +1377,7 @@ namespace Oxide.Plugins
                     if (skipUnderworld)
                     {
                         j = TerrainMeta.HeightMap.GetHeight(target.transform.position);
-                        
+
                         if (j > target.transform.position.y)
                         {
                             if (source.transform.position.y > k)
@@ -1436,7 +1436,7 @@ namespace Oxide.Plugins
 
                 entityType = EntityType.Ore;
                 double currDistance;
-                
+
                 foreach (var ore in cache.Ores)
                 {
                     currDistance = Math.Floor(Vector3.Distance(ore.Key, source.transform.position));
@@ -1460,7 +1460,7 @@ namespace Oxide.Plugins
 
                 entityType = EntityType.Collectibles;
                 double currDistance;
-                
+
                 foreach (var col in cache.Collectibles)
                 {
                     currDistance = Math.Floor(Vector3.Distance(col.Key, source.transform.position));
@@ -1525,7 +1525,7 @@ namespace Oxide.Plugins
                         if (objectsLimit > 0 && ++drawnObjects > objectsLimit) return false;
                     }
                 }
-                
+
                 return LatencyAccepted();
             }
 
@@ -1598,7 +1598,7 @@ namespace Oxide.Plugins
                 return value * 0.02;
             }
         }
-        
+
         private bool IsRadar(string id)
         {
             return activeRadars.Any(x => x.player.UserIDString == id);
@@ -1790,7 +1790,7 @@ namespace Oxide.Plugins
         private object OnEntityTakeDamage(BaseCombatEntity entity, HitInfo info)
         {
             var attacker = info?.Initiator as BasePlayer;
-            
+
             if (attacker == null || !attacker.IsConnected)
             {
                 return null;
@@ -2250,7 +2250,7 @@ namespace Oxide.Plugins
 
             cmdESP(player, "espgui", arg.Args);
         }
-        
+
         private void cmdESP(BasePlayer player, string command, string[] args)
         {
             if (!HasAccess(player))
@@ -2811,7 +2811,7 @@ namespace Oxide.Plugins
         private static bool showUI;
         private static bool showTCAuthedCount;
         private static bool showTCBagCount;
-        
+
         private static string distCC;
         private static string heliCC;
         private static string bradleyCC;
@@ -2859,7 +2859,7 @@ namespace Oxide.Plugins
         private static bool trackSupplyDrops = true;
         private static bool trackTC = true;
         private static bool trackTurrets = true;
-        
+
         private static bool trackMiniCopter; // additional tracking
         private static bool trackHeli;
         private static bool trackBradley;
@@ -3112,7 +3112,7 @@ namespace Oxide.Plugins
             skipUnderworld = Convert.ToBoolean(GetConfig("Options", "Only Show NPCPlayers At World View", false));
             showTCAuthedCount = Convert.ToBoolean(GetConfig("Options", "Show Authed Count On Cupboards", true));
             showTCBagCount = Convert.ToBoolean(GetConfig("Options", "Show Bag Count On Cupboards", true));
-            
+
             drawArrows = Convert.ToBoolean(GetConfig("Drawing Methods", "Draw Arrows On Players", false));
             drawBox = Convert.ToBoolean(GetConfig("Drawing Methods", "Draw Boxes", false));
             drawText = Convert.ToBoolean(GetConfig("Drawing Methods", "Draw Text", true));
@@ -3121,7 +3121,7 @@ namespace Oxide.Plugins
             groupLimit = Convert.ToInt32(GetConfig("Group Limit", "Limit", 4));
             groupRange = Convert.ToSingle(GetConfig("Group Limit", "Range", 50f));
             groupCountHeight = Convert.ToSingle(GetConfig("Group Limit", "Height Offset [0.0 = disabled]", 40f));
-            
+
             mcDistance = Convert.ToSingle(GetConfig("Drawing Distances", "MiniCopter", 200f));
             boatDistance = Convert.ToSingle(GetConfig("Drawing Distances", "Boats", 150f));
             carDistance = Convert.ToSingle(GetConfig("Drawing Distances", "Cars", 500f));
@@ -3300,7 +3300,7 @@ namespace Oxide.Plugins
                     sb.Replace(entry.Key, entry.Value);
                 }
             }
-            
+
             return args.Length > 0 ? string.Format(sb.ToString(), args) : sb.ToString();
         }
 

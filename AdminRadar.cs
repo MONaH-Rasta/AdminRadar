@@ -7,6 +7,7 @@ using System.Linq;
 using System.Reflection;
 using System.Text;
 using System.Text.RegularExpressions;
+using Facepunch;
 using Oxide.Core;
 using Oxide.Core.Libraries.Covalence;
 using Oxide.Core.Plugins;
@@ -14,21 +15,20 @@ using Oxide.Game.Rust.Cui;
 using Rust;
 using UnityEngine;
 
-/*  
-    Fixed minicopter tracking
-    Fixed Coroutine continue failure warning message
-    Possible fix for OnPlayerSleepEnded.CreateUI NullReferenceException
+/*
+    Removed reflection for newly exposed numViewers
+    Fixed infinite loop when using Performance Mode
+    Added DiscordMessages support to config. Made possible by Corvezeo
+    Added `Show Radar Activated/Deactivated Messages` true
 */
 
 namespace Oxide.Plugins
 {
-    [Info("Admin Radar", "nivex", "5.0.3")]
+    [Info("Admin Radar", "nivex", "5.0.4")]
     [Description("Radar tool for Admins and Developers.")]
     class AdminRadar : RustPlugin
     {
-        [PluginReference] Plugin Vanish;
-
-        private static readonly FieldInfo numViewers = typeof(CCTV_RC).GetField("numViewers", (BindingFlags.Public | BindingFlags.Static | BindingFlags.Instance | BindingFlags.NonPublic));
+        [PluginReference] Plugin Vanish, DiscordMessages;
 
         private const string permAllowed = "adminradar.allowed";
         private const string permBypass = "adminradar.bypass";
@@ -42,28 +42,70 @@ namespace Oxide.Plugins
         private bool init; // don't use cache while false
         private static bool isUnloading;
 
-        private static readonly List<string> tags = new List<string>
+        private List<string> tags = new List<string>
             {"ore", "cluster", "1", "2", "3", "4", "5", "6", "_", ".", "-", "deployed", "wooden", "large", "pile", "prefab", "collectable", "loot", "small"}; // strip these from names to reduce the size of the text and make it more readable
 
         private readonly Dictionary<ulong, Color> playersColor = new Dictionary<ulong, Color>();
         private readonly List<BasePlayer> accessList = new List<BasePlayer>();
         private readonly Dictionary<ulong, Timer> voices = new Dictionary<ulong, Timer>();
-        private static readonly List<Radar> activeRadars = new List<Radar>();
+        private readonly List<Radar> activeRadars = new List<Radar>();
         private readonly List<string> warnings = new List<string>();
 
-        private static readonly Dictionary<ulong, float> cooldowns = new Dictionary<ulong, float>();
+        private readonly Dictionary<ulong, float> cooldowns = new Dictionary<ulong, float>();
         private static Cache cache = new Cache();
         private Coroutine coroutine;
 
         private const bool True = true;
         private const bool False = false;
-        
+
         public enum CupboardAction
         {
             Authorize,
             Clear,
             Deauthorize
         }
+
+        private class CachedStringBuilder
+        {
+            private readonly StringBuilder _builder = new StringBuilder();
+            private string _str;
+
+            internal int Length
+            {
+                get
+                {
+                    return _builder.Length;
+                }
+                set
+                {
+                    _builder.Length -= value;
+                }
+            }
+
+            public void Append(string val)
+            {
+                _builder.Append(val);
+            }
+
+            public void Append(object obj)
+            {
+                _builder.Append(obj);
+            }
+
+            public override string ToString()
+            {
+                _str = _builder.ToString();
+                _builder.Clear();
+                return _str;
+            }
+
+            internal void Replace(string v1, string v2)
+            {
+                _builder.Replace(v1, v2);
+            }
+        }
+
+        private static CachedStringBuilder _cachedStringBuilder { get; set; }
 
         private class Cache
         {
@@ -143,10 +185,15 @@ namespace Oxide.Plugins
 
         public static class Coroutines // Credits to Jake Rich
         {
-            private static Dictionary<float, YieldInstruction> _waitForSecondDict = new Dictionary<float, YieldInstruction>();
+            private static Dictionary<float, YieldInstruction> _waitForSecondDict;
 
             public static YieldInstruction WaitForSeconds(float delay)
             {
+                if (_waitForSecondDict == null)
+                {
+                    _waitForSecondDict = new Dictionary<float, YieldInstruction>();
+                }
+
                 YieldInstruction yield;
                 if (!_waitForSecondDict.TryGetValue(delay, out yield))
                 {
@@ -157,11 +204,86 @@ namespace Oxide.Plugins
 
                 return yield;
             }
+
+            public static void Clear()
+            {
+                if (_waitForSecondDict != null)
+                {
+                    _waitForSecondDict.Clear();
+                    _waitForSecondDict = null;
+                }
+            }
+        }
+
+        public string PositionToGrid(Vector3 position) // Rewrite from yetzt implementation
+        {
+            var r = new Vector2(World.Size / 2 + position.x, World.Size / 2 + position.z);
+            var x = Mathf.Floor(r.x / 146.3f) % 26;
+            var z = Mathf.Floor(World.Size / 146.3f) - Mathf.Floor(r.y / 146.3f);
+
+            return $"{(char)('A' + x)}{z - 1}";
+        }
+
+        private void AdminRadarDiscordMessage(string playerName, string playerId, bool state, Vector3 position)
+        {
+            string text = state ? _discordMessageToggleOn : _discordMessageToggleOff;
+            string grid = PositionToGrid(position);
+            string message = $"[{DateTime.Now}] {playerName} ({playerId} @ {grid}): {text}";
+
+            var chatEntry = new ConVar.Chat.ChatEntry
+            {
+                Message = message,
+                UserId = playerId,
+                Username = playerName,
+                Time = Facepunch.Math.Epoch.Current
+            };
+
+            LogToFile("toggles", message, this, false);
+            RCon.Broadcast(RCon.LogType.Chat, chatEntry);
+
+            if (!_sendDiscordMessages || DiscordMessages == null || !DiscordMessages.IsLoaded)
+            {
+                return;
+            }
+
+            string steam = $"[{playerName}](https://steamcommunity.com/profiles/{playerId})";
+            string server = $"steam://connect/{ConVar.Server.ip}:{ConVar.Server.port}";
+
+            object fields = new[]
+            {
+                new 
+                {
+                    name = _embedMessagePlayer, 
+                    value = steam, 
+                    inline = true
+                },
+                new 
+                {
+                    name = _embedMessageMessage, 
+                    value = text, 
+                    inline = false
+                },
+                new 
+                {
+                    name = _embedMessageServer, 
+                    value = server, 
+                    inline = false
+                },
+                new 
+                {
+                    name = _embedMessageLocation, 
+                    value = grid, 
+                    inline = false
+                }
+            };
+
+            string json = Newtonsoft.Json.JsonConvert.SerializeObject(fields);
+
+            Interface.CallHook("API_SendFancyMessage", _webhookUrl, _embedMessageTitle, _messageColor, json, null, this);
         }
 
         private class Radar : FacepunchBehaviour
         {
-            private int drawnObjects;
             private EntityType entityType;
             private int _inactiveSeconds;
             private int activeSeconds;
@@ -199,7 +321,7 @@ namespace Oxide.Plugins
             public bool showTurrets;
             public bool showAll;
             private BaseEntity source;
-            private StringBuilder _cachedStringBuilder = new StringBuilder();
+            public bool barebonesMode;
 
             private class Ping
             {
@@ -232,9 +354,9 @@ namespace Oxide.Plugins
                 tcs = new Dictionary<BuildingPrivlidge, PrivInfo>();
                 pings = new Dictionary<ulong, Ping>();
 
-                activeRadars.Add(this);
+                ins.activeRadars.Add(this);
 
-                if (activeRadars.Count == 1 && (blockDamageAnimals || blockDamageBuildings || blockDamageNpcs || blockDamagePlayers || blockDamageOther))
+                if (ins.activeRadars.Count == 1 && (blockDamageAnimals || blockDamageBuildings || blockDamageNpcs || blockDamagePlayers || blockDamageOther))
                 {
                     ins.Subscribe(nameof(OnEntityTakeDamage));
                 }
@@ -247,6 +369,8 @@ namespace Oxide.Plugins
                 {
                     InvokeRepeating(Activity, 0f, 1f);
                 }
+
+                ins.AdminRadarDiscordMessage(player.displayName, player.UserIDString, true, player.transform.position);
             }
 
             public void StopAll()
@@ -262,6 +386,8 @@ namespace Oxide.Plugins
 
             private void OnDestroy()
             {
+                Interface.CallHook("AdminRadarDiscordMessage", player.displayName, player.UserIDString, false, player.transform.position);
+
                 StopAll();
                 nearbyPlayers.Clear();
                 groupedPlayers.Clear();
@@ -272,20 +398,29 @@ namespace Oxide.Plugins
                 if (radarUI.Contains(player.UserIDString))
                     ins.DestroyUI(player);
 
-                activeRadars.Remove(this);
+                if (ins == null)
+                {
+                    Destroy(this);
+                    return;
+                }
 
-                if (activeRadars.Count == 0 && !isUnloading) ins.Unsubscribe(nameof(OnEntityTakeDamage));
+                ins.activeRadars.Remove(this);
+
+                if (ins.activeRadars.Count == 0 && !isUnloading) ins.Unsubscribe(nameof(OnEntityTakeDamage));
 
                 if (player != null && player.IsConnected)
                 {
                     if (coolDown > 0f)
                     {
-                        if (!cooldowns.ContainsKey(player.userID))
-                            cooldowns.Add(player.userID, Time.realtimeSinceStartup + coolDown);
-                        else cooldowns[player.userID] = Time.realtimeSinceStartup + coolDown;
+                        if (!ins.cooldowns.ContainsKey(player.userID))
+                            ins.cooldowns.Add(player.userID, Time.realtimeSinceStartup + coolDown);
+                        else ins.cooldowns[player.userID] = Time.realtimeSinceStartup + coolDown;
                     }
 
-                    Message(player, ins.msg("Deactivated", player.UserIDString));
+                    if (ins.showToggleMessage)
+                    {
+                        Message(player, ins.msg("Deactivated", player.UserIDString));
+                    }
                 }
 
                 Destroy(this);
@@ -377,22 +512,61 @@ namespace Oxide.Plugins
                     _routine = null;
                 }
 
-                _routine = StartCoroutine(DoRadarRoutine());
+                _routine = StartCoroutine(barebonesMode ? DoBareRadarRoutine() : DoRadarRoutine());
             }
 
-            bool isAdmin;
+            bool isAdmin { get; set; }
 
-            IEnumerator DoRadarRoutine()
+            IEnumerator DoBareRadarRoutine()
             {
                 do
                 {
-                    if (!player || !player.IsConnected)
+                    if (!player || !player.IsConnected || isUnloading)
                     {
                         Destroy(this);
                         yield break;
                     }
 
-                    drawnObjects = 0;
+                    if (!isAdmin && ins.permission.UserHasPermission(player.UserIDString, permAllowed))
+                    {
+                        player.SetPlayerFlag(BasePlayer.PlayerFlags.IsAdmin, True);
+                        player.SendNetworkUpdateImmediate();
+                    }
+
+                    if (!SetSource())
+                    {
+                        yield return Coroutines.WaitForSeconds(0.1f);
+                        continue;
+                    }
+
+                    if (ShowActive() >= 50)
+                    {
+                        checks = 0;
+                        yield return null;
+                    }
+
+                    ShowSleepers();
+
+                    if (!isAdmin && player.HasPlayerFlag(BasePlayer.PlayerFlags.IsAdmin))
+                    {
+                        player.SetPlayerFlag(BasePlayer.PlayerFlags.IsAdmin, False);
+                        player.SendNetworkUpdateImmediate();
+                    }
+
+                    checks = 0;
+                    yield return Coroutines.WaitForSeconds(invokeTime);
+                } while (player.IsValid() && player.IsConnected);
+            }
+
+            IEnumerator DoRadarRoutine()
+            {
+                do
+                {
+                    if (!player || !player.IsConnected || isUnloading)
+                    {
+                        Destroy(this);
+                        yield break;
+                    }
 
                     if (!isAdmin && ins.permission.UserHasPermission(player.UserIDString, permAllowed))
                     {
@@ -416,12 +590,6 @@ namespace Oxide.Plugins
                     {
                         checks = 0;
                         yield return null;
-                    }
-
-                    if (barebonesMode)
-                    {
-                        checks = 0;
-                        continue;
                     }
 
                     if (ShowEntity(EntityType.Cars, showCars, "C", cache.Cars) >= 300)
@@ -946,8 +1114,6 @@ namespace Oxide.Plugins
 
                         if (currDistance < playerDistance)
                         {
-                            _cachedStringBuilder.Clear();
-
                             if (ins.storedData.Extended.Contains(player.UserIDString) && target.GetActiveItem() != null)
                             {
                                 _cachedStringBuilder.Append(target.GetActiveItem().info.displayName.translated);
@@ -959,7 +1125,8 @@ namespace Oxide.Plugins
 
                                     for (int index = 0; index < itemList.Count; index++)
                                     {
-                                        _cachedStringBuilder.Append(itemList[index].info.displayName.translated).Append("|");
+                                        _cachedStringBuilder.Append(itemList[index].info.displayName.translated);
+                                        _cachedStringBuilder.Append("|");
                                     }
 
                                     _cachedStringBuilder.Replace("Weapon ", "");
@@ -973,7 +1140,13 @@ namespace Oxide.Plugins
                             string vanished = ins.Vanish != null && ins.Vanish.Call<bool>("IsInvisible", target) ? "<color=#FF00FF>V</color>" : string.Empty;
                             string health = showHT && target.metabolism != null ? string.Format("{0} <color=#FFA500>{1}</color>:<color=#FFADD8E6>{2}</color>", Math.Floor(target.health), target.metabolism.calories.value.ToString("#0"), target.metabolism.hydration.value.ToString("#0")) : Math.Floor(target.health).ToString("#0");
 
-                            if (averagePingInterval > 0) _cachedStringBuilder.Append(" ").Append(GetAveragePing(target)).Append("ms");
+                            if (averagePingInterval > 0)
+                            {
+                                _cachedStringBuilder.Append(" ");
+                                _cachedStringBuilder.Append(GetAveragePing(target));
+                                _cachedStringBuilder.Append("ms");
+                            }
+
                             if (ins.storedData.Visions.Contains(player.UserIDString)) DrawVision(target);
                             DrawArrow(__(colorDrawArrows), target.transform.position + new Vector3(0f, target.transform.position.y + 10), target.transform.position, 1, false);
                             DrawText(color, target.transform.position + new Vector3(0f, 2f, 0f), string.Format("{0} <color={1}>{2}</color> <color={3}>{4}</color>{5} {6}", ins.RemoveFormatting(target.displayName) ?? target.userID.ToString(), healthCC, health, distCC, currDistance.ToString("0"), vanished, _cachedStringBuilder.ToString()));
@@ -1218,7 +1391,7 @@ namespace Oxide.Plugins
                     distantPlayers.Clear();
                     removePlayers.Clear();
                 }
-                catch(Exception ex)
+                catch (Exception ex)
                 {
                     HandleException(ex);
                 }
@@ -1353,7 +1526,7 @@ namespace Oxide.Plugins
 
                             string text = showAirdropContents && drop.inventory.itemList.Count > 0 ? GetContents(drop.inventory.itemList) : string.Format("({0}) ", drop.inventory.itemList.Count);
 
-                            DrawText(__(airdropCC), drop.transform.position + new Vector3(0f, 0.5f, 0f), string.Format("{0} {1}<color={2}>{3}</color>", _(drop.ShortPrefabName), text, distCC, currDistance.ToString("0"), lootCC));
+                            DrawText(__(airdropCC), drop.transform.position + new Vector3(0f, 0.5f, 0f), string.Format("{0} {1}<color={2}>{3}</color>", ins._(drop.ShortPrefabName), text, distCC, currDistance.ToString("0"), lootCC));
                             DrawBox(__(airdropCC), drop.transform.position + new Vector3(0f, 0.5f, 0f), GetScale(currDistance));
                             checks++;
                         }
@@ -1391,7 +1564,6 @@ namespace Oxide.Plugins
                         }
 
                         string colorHex = isBox ? boxCC : isLoot ? lootCC : stashCC;
-                        _cachedStringBuilder.Clear();
 
                         if (ins.storedData.OnlineBoxes.Contains(player.UserIDString) && container.OwnerID.IsSteamId() && (container.name.Contains("box") || container.name.Contains("coffin")))
                         {
@@ -1407,7 +1579,7 @@ namespace Oxide.Plugins
 
                         if (text.Length == 0 && !drawEmptyContainers) continue;
 
-                        string shortname = _(container.ShortPrefabName).Replace("coffinstorage", "coffin");
+                        string shortname = ins._(container.ShortPrefabName).Replace("coffinstorage", "coffin");
                         DrawText(__(colorHex), container.transform.position + new Vector3(0f, 0.5f, 0f), string.Format("{0} {1}<color={2}>{3}</color>", shortname, text, distCC, currDistance.ToString("0")));
                         DrawBox(__(colorHex), container.transform.position + new Vector3(0f, 0.5f, 0f), GetScale(currDistance));
                         checks++;
@@ -1442,7 +1614,7 @@ namespace Oxide.Plugins
                         }
                     }
                 }
-                catch(Exception ex)
+                catch (Exception ex)
                 {
                     HandleException(ex);
                 }
@@ -1503,7 +1675,7 @@ namespace Oxide.Plugins
                         }
                     }
                 }
-                catch(Exception ex)
+                catch (Exception ex)
                 {
                     HandleException(ex);
                 }
@@ -1665,8 +1837,7 @@ namespace Oxide.Plugins
 
                         if (currDistance < cctvDistance && currDistance < maxDistance)
                         {
-                            int viewers = (int)(numViewers.GetValue(cctv) ?? 0);
-                            string info = string.Format("<color={0}>{1}</color> {2}", distCC, currDistance.ToString("0"), viewers);
+                            string info = string.Format("<color={0}>{1}</color> {2}", distCC, currDistance.ToString("0"), cctv.numViewers);
                             var color = cctv.HasFlag(BaseEntity.Flags.Reserved5) ? Color.green : cctv.CanControl() ? Color.cyan : Color.red;
                             DrawText(color, cctv.transform.position + new Vector3(0f, 0.3f, 0f), string.Format("CCTV {0}", info));
                             DrawBox(color, cctv.transform.position, 0.25f);
@@ -1698,7 +1869,7 @@ namespace Oxide.Plugins
                         if (currDistance < colDistance && currDistance < maxDistance)
                         {
                             string info = showResourceAmounts ? string.Format("({0})", col.Value.Info) : string.Format("<color={0}>{1}</color>", distCC, currDistance.ToString("0"));
-                            DrawText(__(colCC), col.Key + new Vector3(0f, 1f, 0f), string.Format("{0} {1}", _(col.Value.Name), info));
+                            DrawText(__(colCC), col.Key + new Vector3(0f, 1f, 0f), string.Format("{0} {1}", ins._(col.Value.Name), info));
                             DrawBox(__(colCC), col.Key + new Vector3(0f, 1f, 0f), col.Value.Size);
                             checks++;
                         }
@@ -1753,7 +1924,7 @@ namespace Oxide.Plugins
                             else if (entityType == EntityType.CH47Helicopters && !trackCH47 && !uiBtnCH47) continue;
 
                             string info = e.Health() <= 0 ? entityName : string.Format("{0} <color={1}>{2}</color>", entityName, healthCC, e.Health() > 1000 ? Math.Floor(e.Health()).ToString("#,##0,K", CultureInfo.InvariantCulture) : Math.Floor(e.Health()).ToString("#0"));
-                            
+
                             DrawText(__(bradleyCC), e.transform.position + new Vector3(0f, 2f, 0f), string.Format("{0} <color={1}>{2}</color>", info, distCC, currDistance.ToString("0")));
                             DrawBox(__(bradleyCC), e.transform.position + new Vector3(0f, 1f, 0f), GetScale(currDistance));
                             checks++;
@@ -1770,14 +1941,16 @@ namespace Oxide.Plugins
 
             private string GetContents(List<Item> itemList)
             {
-                _cachedStringBuilder.Clear();
                 _cachedStringBuilder.Append("(");
 
                 for (int index = 0; index < itemList.Count; index++)
                 {
                     var item = itemList[index];
-                    _cachedStringBuilder.Append(item.info.displayName.translated).Append(" ");
-                    _cachedStringBuilder.Append("(").Append(item.amount).Append("), ");
+                    _cachedStringBuilder.Append(item.info.displayName.translated);
+                    _cachedStringBuilder.Append(" ");
+                    _cachedStringBuilder.Append("(");
+                    _cachedStringBuilder.Append(item.amount);
+                    _cachedStringBuilder.Append("), ");
                 }
 
                 _cachedStringBuilder.Length -= 2;
@@ -1872,6 +2045,7 @@ namespace Oxide.Plugins
         private void Init()
         {
             ins = this;
+            _cachedStringBuilder = new CachedStringBuilder();
             Unsubscribe(nameof(OnEntityTakeDamage));
             Unsubscribe(nameof(OnEntityDeath));
             Unsubscribe(nameof(OnEntityKill));
@@ -1977,7 +2151,7 @@ namespace Oxide.Plugins
             {
                 float delay = defaultInvokeTime;
 
-                foreach(var radar in activeRadars)
+                foreach (var radar in activeRadars)
                 {
                     delay = Mathf.Max(radar.invokeTime, delay);
                 }
@@ -2003,7 +2177,7 @@ namespace Oxide.Plugins
             StopFillCache();
             Interface.Oxide.DataFileSystem.WriteObject(Name, storedData);
 
-            foreach(var radar in activeRadars)
+            foreach (var radar in activeRadars)
             {
                 radar.StopAll();
             }
@@ -2013,13 +2187,14 @@ namespace Oxide.Plugins
             tags.Clear();
             voices.Clear();
             activeRadars.Clear();
-            cache = null;
             uiBtnNames = new string[0];
-            uiButtons = null;
             authorized.Clear();
             itemExceptions.Clear();
             groupColors.Clear();
             cooldowns.Clear();
+            Coroutines.Clear();
+            ins = null;
+            _cachedStringBuilder = null;
         }
 
         void DestroyAll<T>()
@@ -2138,9 +2313,11 @@ namespace Oxide.Plugins
             return color;
         }
 
-        private static string _(string value)
+        StringBuilder sb;
+
+        private string _(string value)
         {
-            var sb = new StringBuilder(value);
+            sb = new StringBuilder(value);
 
             foreach (string str in tags)
             {
@@ -2761,7 +2938,7 @@ namespace Oxide.Plugins
 
                 list.Clear();
 
-                for(int j = 0; j < args.Length; j++)
+                for (int j = 0; j < args.Length; j++)
                 {
                     list.Add(args[j]);
                 }
@@ -2771,6 +2948,8 @@ namespace Oxide.Plugins
 
             var radar = player.GetComponent<Radar>() ?? player.gameObject.AddComponent<Radar>();
             float invokeTime, maxDistance, outTime, outDistance;
+            
+            radar.barebonesMode = barebonesMode;
 
             if (args.Length > 0 && float.TryParse(args[0], NumberStyles.AllowDecimalPoint, CultureInfo.InvariantCulture, out outTime))
                 invokeTime = outTime < 0.1f ? 0.1f : outTime;
@@ -2826,7 +3005,7 @@ namespace Oxide.Plugins
             radar.maxDistance = maxDistance;
             radar.Start();
 
-            if (command == "espgui")
+            if (command == "espgui" || !showToggleMessage)
                 return;
 
             Message(player, msg("Activated", player.UserIDString, invokeTime, maxDistance, command));
@@ -2834,7 +3013,7 @@ namespace Oxide.Plugins
 
         private bool isArg(string[] args, string arg, bool equalTo = False)
         {
-            for(int j = 0; j < args.Length; j++)
+            for (int j = 0; j < args.Length; j++)
             {
                 if (equalTo)
                 {
@@ -2852,7 +3031,7 @@ namespace Oxide.Plugins
             return False;
         }
 
-#region UI
+        #region UI
 
         private static string[] uiBtnNames = new string[0];
         private static Dictionary<int, Dictionary<string, string>> uiButtons;
@@ -3064,12 +3243,12 @@ namespace Oxide.Plugins
             }
         }
 
-#endregion
+        #endregion
 
-#region Config
+        #region Config
 
         private bool Changed;
-        private static bool barebonesMode;
+        private bool barebonesMode;
         private static int averagePingInterval;
         private static bool drawText = True;
         private static bool drawBox;
@@ -3216,6 +3395,17 @@ namespace Oxide.Plugins
         private static bool blockDamageNpcs;
         private static bool blockDamageOther;
         private static float coolDown;
+        private string _webhookUrl;
+        private int _messageColor;
+        private bool _sendDiscordMessages;
+        private string _embedMessageTitle;
+        private string _embedMessagePlayer;
+        private string _embedMessageMessage;
+        private string _embedMessageLocation;
+        private string _embedMessageServer;
+        private string _discordMessageToggleOn;
+        private string _discordMessageToggleOff;
+        private bool showToggleMessage;
 
         private List<object> ItemExceptions
         {
@@ -3358,7 +3548,7 @@ namespace Oxide.Plugins
                 ["CantHurtPlayers"] = "You can't hurt players while using radar",
                 ["CantHurtNpcs"] = "You can't hurt npcs while using radar",
                 ["CantHurtOther"] = "You can't hurt this while using radar",
-                ["WaitCooldown"] = "You must wait {0} seconds to use this command again."
+                ["WaitCooldown"] = "You must wait {0} seconds to use this command again.",
             }, this);
         }
 
@@ -3392,6 +3582,7 @@ namespace Oxide.Plugins
             showUI = Convert.ToBoolean(GetConfig("Settings", "User Interface Enabled", True));
             averagePingInterval = Convert.ToInt32(GetConfig("Settings", "Show Average Ping Every X Seconds [0 = disabled]", 0));
             coolDown = Convert.ToSingle(GetConfig("Settings", "Re-use Cooldown, Seconds", 0f));
+            showToggleMessage = Convert.ToBoolean(GetConfig("Settings", "Show Radar Activated/Deactivated Messages", True));
 
             blockDamageAnimals = Convert.ToBoolean(GetConfig("When Radar Is Active", "Block Damage To Animals", False));
             blockDamageBuildings = Convert.ToBoolean(GetConfig("When Radar Is Active", "Block Damage To Buildings", False));
@@ -3548,6 +3739,18 @@ namespace Oxide.Plugins
 
             if (voiceInterval < 3)
                 voiceInterval = 3;
+
+            _messageColor = Convert.ToInt32(GetConfig("DiscordMessages", "Message - Embed Color (DECIMAL)", 3329330));
+            _webhookUrl = Convert.ToString(GetConfig("DiscordMessages", "Message - Webhook URL", "https://support.discordapp.com/hc/en-us/articles/228383668-Intro-to-Webhooks"));
+            _sendDiscordMessages = _webhookUrl != "https://support.discordapp.com/hc/en-us/articles/228383668-Intro-to-Webhooks";
+
+            _embedMessageServer = Convert.ToString(GetConfig("DiscordMessages", "Embed_MessageServer", "Server"));
+            _embedMessageLocation = Convert.ToString(GetConfig("DiscordMessages", "Embed_MessageLocation", "Location"));
+            _embedMessageMessage = Convert.ToString(GetConfig("DiscordMessages", "Embed_MessageTitle", "Player Message"));
+            _embedMessagePlayer = Convert.ToString(GetConfig("DiscordMessages", "Embed_MessagePlayer", "Player"));
+            _embedMessageTitle = Convert.ToString(GetConfig("DiscordMessages", "Embed_MessageMessage", "Message"));
+            _discordMessageToggleOff = Convert.ToString(GetConfig("DiscordMessages", "Off", "Radar turned off."));
+            _discordMessageToggleOn = Convert.ToString(GetConfig("DiscordMessages", "On", "Radar turned on."));
 
             if (Changed)
             {

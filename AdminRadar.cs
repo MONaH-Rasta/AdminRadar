@@ -17,9 +17,11 @@ using Rust;
 using UnityEngine;
 
 /*
-Fixed ShowActive().NullReferenceException
+
 */
 
+//https://umod.org/community/admin-radar/40872-give-us-options-to-allow-radar-only-in-spectate-or-in-vanish?page=1#post-3 
+//https://umod.org/community/admin-radar/38890-cant-see-zombies-zh?page=2#post-22
 // make all entities dynamic and where they can be assigned to any filter or their own
 // implement toggable filters
 
@@ -29,7 +31,7 @@ Fixed ShowActive().NullReferenceException
 
 namespace Oxide.Plugins
 {
-    [Info("Admin Radar", "nivex", "5.1.7")]
+    [Info("Admin Radar", "nivex", "5.1.8")]
     [Description("Radar tool for Admins and Developers.")]
     class AdminRadar : RustPlugin
     {
@@ -77,7 +79,7 @@ namespace Oxide.Plugins
 
             private void Create()
             {
-                foreach (BaseEntity entity in BaseNetworkable.serverEntities)
+                foreach (BaseEntity entity in OfType<BaseEntity>(BaseNetworkable.serverEntities))
                 {
                     CacheInfo ci;
                     if (!dict.TryGetValue(entity.GetType().Name, out ci))
@@ -243,6 +245,20 @@ namespace Oxide.Plugins
             Turrets,
             Zombies
         }
+
+        private static List<T> OfType<T>(IEnumerable<BaseNetworkable> networkables) where T : BaseEntity
+        {
+            List<T> result = new List<T>();
+            using (var enumerator = networkables.GetEnumerator())
+            {
+                if (enumerator.Current is T)
+                {
+                    result.Add(enumerator.Current as T);
+                }
+            }
+            return result;
+        }
+
 
         private string PositionToGrid(Vector3 position) // Credit: MagicGridPanel
         {
@@ -2094,15 +2110,18 @@ namespace Oxide.Plugins
 
                     return npc.GetBestTarget() as BasePlayer;
                 }
-                /*else if (entity is BaseAnimalNPC) // brain must be exposed
+                else if (entity is BaseAnimalNPC) // brain must be exposed
                 {
                     var npc = entity as BaseAnimalNPC;
 
                     foreach (var target in npc.brain.Senses.Players)
                     {
-                        return target as BasePlayer;
+                        if (target is BasePlayer)
+                        {
+                            return target as BasePlayer;
+                        }
                     }
-                }*/
+                }
 
                 return null;
             }
@@ -3254,7 +3273,7 @@ namespace Oxide.Plugins
                         return;
                     case "train":
                         {
-                            foreach (BaseTrain train in BaseNetworkable.serverEntities)
+                            foreach (TrainCar train in OfType<TrainCar>(BaseNetworkable.serverEntities))
                             { 
                                 timer.Repeat(1f, 60, () => 
                                 {
@@ -3597,7 +3616,7 @@ namespace Oxide.Plugins
                     player.SendNetworkUpdateImmediate();
                 }
                 
-                foreach (BaseEntity e in BaseNetworkable.serverEntities)
+                foreach (var e in OfType<BaseEntity>(BaseNetworkable.serverEntities))
                 {
                     if (e is BuildingPrivlidge && (e as BuildingPrivlidge).IsAuthed(userID))
                     {
@@ -3674,7 +3693,7 @@ namespace Oxide.Plugins
                     player.SendNetworkUpdateImmediate();
                 }
 
-                foreach (BaseEntity o in BaseNetworkable.serverEntities)
+                foreach (BaseEntity o in OfType<BaseEntity>(BaseNetworkable.serverEntities))
                 {
                     if (!o.ShortPrefabName.Contains(value, CompareOptions.OrdinalIgnoreCase)) continue;
                     var distance = Mathf.FloorToInt(o.Distance(player));

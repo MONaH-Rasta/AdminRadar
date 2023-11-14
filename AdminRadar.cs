@@ -10,15 +10,9 @@ using Oxide.Game.Rust.Cui;
 using UnityEngine;
 using Random = UnityEngine.Random;
 
-// Fixed NullReferenceException in HasAccess @maxaki
-// Reduced map marker radius size due to map update @darkzen
-// Removed CSS from player names @casualrussian
-// Added config option 'Color-Hex Codes > Player Arrows > #f000000' (black) @ForGx3
-// adminradar.allowed now allows full radar functionality without requiring FauxAdmin. This temporarily grants the player the admin flag. USE AT YOUR OWN RISK. @Covfefe
-
 namespace Oxide.Plugins
 {
-    [Info("Admin Radar", "nivex", "4.5.5")]
+    [Info("Admin Radar", "nivex", "4.5.6")]
     [Description("Radar tool for Admins and Developers.")]
     public class AdminRadar : RustPlugin
     {
@@ -113,6 +107,16 @@ namespace Oxide.Plugins
             public static bool HasMarker(BaseEntity entity)
             {
                 return markers.Values.Any(e => e.vending == entity || e.personal == entity || e.generic == entity);
+            }
+
+            public static Marker GetMarker(BaseEntity entity)
+            {
+                if (HasMarker(entity))
+                {
+                    return markers.Values.First(e => e.vending == entity || e.personal == entity || e.generic == entity);
+                }
+
+                return null;
             }
 
             public void RefreshMarker()
@@ -799,8 +803,8 @@ namespace Oxide.Plugins
                             }
                         }
 
-                        string vanished = ins.Vanish != null && target.IPlayer.HasPermission("vanish.use") && (bool)ins.Vanish.Call("IsInvisible", target) ? "<color=magenta>V</color>" : string.Empty;
-                        string health = showHT && target.metabolism != null ? string.Format("{0} <color=orange>{1}</color>:<color=lightblue>{2}</color>", Math.Floor(target.health), target.metabolism.calories.value.ToString("#0"), target.metabolism.hydration.value.ToString("#0")) : Math.Floor(target.health).ToString("#0");
+                        string vanished = ins.Vanish != null && target.IPlayer.HasPermission("vanish.use") && (bool)ins.Vanish.Call("IsInvisible", target) ? "<color=#FF00FF>V</color>" : string.Empty;
+                        string health = showHT && target.metabolism != null ? string.Format("{0} <color=#FFA500>{1}</color>:<color=#FFADD8E6>{2}</color>", Math.Floor(target.health), target.metabolism.calories.value.ToString("#0"), target.metabolism.hydration.value.ToString("#0")) : Math.Floor(target.health).ToString("#0");
 
                         if (storedData.Visions.Contains(player.UserIDString)) DrawVision(player, target, invokeTime);
                         if (drawArrows) player.SendConsoleCommand("ddraw.arrow", invokeTime + flickerDelay, __(colorDrawArrows), target.transform.position + new Vector3(0f, target.transform.position.y + 10), target.transform.position, 1);
@@ -839,7 +843,7 @@ namespace Oxide.Plugins
 
                     if (currDistance < playerDistance)
                     {
-                        string health = showHT && sleeper.metabolism != null ? string.Format("{0} <color=orange>{1}</color>:<color=lightblue>{2}</color>", Math.Floor(sleeper.health), sleeper.metabolism.calories.value.ToString("#0"), sleeper.metabolism.hydration.value.ToString("#0")) : Math.Floor(sleeper.health).ToString("#0");
+                        string health = showHT && sleeper.metabolism != null ? string.Format("{0} <color=#FFA500>{1}</color>:<color=#FFADD8E6>{2}</color>", Math.Floor(sleeper.health), sleeper.metabolism.calories.value.ToString("#0"), sleeper.metabolism.hydration.value.ToString("#0")) : Math.Floor(sleeper.health).ToString("#0");
                         var color = __(sleeper.IsAlive() ? sleeperCC : sleeperDeadCC);
 
                         if (drawArrows) player.SendConsoleCommand("ddraw.arrow", invokeTime + flickerDelay, __(colorDrawArrows), sleeper.transform.position + new Vector3(0f, sleeper.transform.position.y + 10), sleeper.transform.position, 1);
@@ -868,7 +872,7 @@ namespace Oxide.Plugins
                     {
                         double currDistance = Math.Floor(Vector3.Distance(heli.transform.position, source.transform.position));
                         string heliHealth = heli.health > 1000 ? Math.Floor(heli.health).ToString("#,##0,K", CultureInfo.InvariantCulture) : Math.Floor(heli.health).ToString("#0");
-                        string info = showHeliRotorHealth ? string.Format("<color={0}>{1}</color> (<color=yellow>{2}</color>/<color=yellow>{3}</color>)", healthCC, heliHealth, Math.Floor(heli.weakspots[0].health), Math.Floor(heli.weakspots[1].health)) : string.Format("<color={0}>{1}</color>", healthCC, heliHealth);
+                        string info = showHeliRotorHealth ? string.Format("<color={0}>{1}</color> (<color=#FFFF00>{2}</color>/<color=#FFFF00>{3}</color>)", healthCC, heliHealth, Math.Floor(heli.weakspots[0].health), Math.Floor(heli.weakspots[1].health)) : string.Format("<color={0}>{1}</color>", healthCC, heliHealth);
 
                         if (drawText) player.SendConsoleCommand("ddraw.text", invokeTime + flickerDelay, __(heliCC), heli.transform.position + new Vector3(0f, 2f, 0f), string.Format("H {0} <color={1}>{2}</color>", info, distCC, currDistance));
                         if (drawBox) player.SendConsoleCommand("ddraw.box", invokeTime + flickerDelay, __(heliCC), heli.transform.position + new Vector3(0f, 1f, 0f), GetScale(currDistance));
@@ -1532,9 +1536,21 @@ namespace Oxide.Plugins
 
         private object CanNetworkTo(BaseNetworkable entity, BasePlayer target)
         {
-            if (entity == null || target == null || !(entity is MapMarker) || !Marker.HasMarker(entity as BaseEntity))
+            if (entity == null || target == null || !(entity is MapMarker))
             {
                 return null;
+            }
+
+            var marker = Marker.GetMarker(entity as BaseEntity);
+
+            if (marker == null)
+            {
+                return null;
+            }
+
+            if (marker.player != null)
+            {
+                return target.IsAdmin || DeveloperList.Contains(target.userID);
             }
 
             if (hideSelfMarker && markers.Values.Any(m => m.entity == target && (m.generic == entity || m.vending == entity)))
@@ -1544,34 +1560,26 @@ namespace Oxide.Plugins
 
             if (markers.Values.Any(m => m.IsPrivilegeMarker && (entity == m.personal || entity == m.generic || entity == m.vending)))
             {
-                var marker = markers.Values.First(m => m.IsPrivilegeMarker && (entity == m.personal || entity == m.generic || entity == m.vending));
+                var pm = markers.Values.First(m => m.IsPrivilegeMarker && (entity == m.personal || entity == m.generic || entity == m.vending));
 
-                if (entity == marker.personal) // if usePersonalMarkers then show if the target is authed
+                if (entity == pm.personal) // if usePersonalMarkers then show if the target is authed
                 {
-                    return marker.privilege.IsAuthed(target);
+                    return pm.privilege.IsAuthed(target);
                 }
 
-                if (entity == marker.generic) // only show generic markers to authed players and admins
+                if (entity == pm.generic && usePersonalMarkers && pm.privilege.IsAuthed(target)) // only show generic markers to authed players and admins
                 {
-                    if (usePersonalMarkers && marker.privilege.IsAuthed(target))
-                    {
-                        return true;
-                    }
-
-                    if (HasAccess(target))
-                    {
-                        return true;
-                    }
+                    return true;
                 }
 
-                if (entity == marker.vending) // this marker contains all authed users
+                if (entity == pm.vending) // this marker contains all authed users
                 {
                     if (target.net?.connection?.authLevel == 0)
                     {
                         return false; // do not show who is authed to players
                     }
 
-                    if (marker.personal != null && marker.privilege.IsAuthed(target))
+                    if (pm.personal != null && pm.privilege.IsAuthed(target))
                     {
                         return false; // if usePersonalMarkers then don't show if this is a cupboard they're authed on
                     }
@@ -2251,7 +2259,7 @@ namespace Oxide.Plugins
 
                                 if (currDistance < lootDistance)
                                 {
-                                    if (drawText) player.SendConsoleCommand("ddraw.text", 30f, Color.red, entity.transform.position, string.Format("{0} <color=yellow>{1}</color>", shortname, currDistance));
+                                    if (drawText) player.SendConsoleCommand("ddraw.text", 30f, Color.red, entity.transform.position, string.Format("{0} <color=#FFFF00>{1}</color>", shortname, currDistance));
                                     if (drawBox) player.SendConsoleCommand("ddraw.box", 30f, Color.red, entity.transform.position, 0.25f);
                                     hasDrops = true;
                                 }
@@ -2764,11 +2772,11 @@ namespace Oxide.Plugins
                 {
                     new Dictionary<string, object>
                     {
-                        ["0"] = "magenta",
-                        ["1"] = "green",
-                        ["2"] = "blue",
-                        ["3"] = "orange",
-                        ["4"] = "yellow"
+                        ["0"] = "#FF00FF", // magenta
+                        ["1"] = "#008000", // green
+                        ["2"] = "#0000FF", // blue
+                        ["3"] = "#FFA500", // orange
+                        ["4"] = "#FFFF00" // yellow
                     }
                 };
             }
@@ -2779,8 +2787,8 @@ namespace Oxide.Plugins
             lang.RegisterMessages(new Dictionary<string, string>
             {
                 ["NotAllowed"] = "You are not allowed to use this command.",
-                ["PreviousFilter"] = "To use your previous filter type <color=orange>/{0} f</color>",
-                ["Activated"] = "ESP Activated - {0}s refresh - {1}m distance. Use <color=orange>/{2} help</color> for help.",
+                ["PreviousFilter"] = "To use your previous filter type <color=#FFA500>/{0} f</color>",
+                ["Activated"] = "ESP Activated - {0}s refresh - {1}m distance. Use <color=#FFA500>/{2} help</color> for help.",
                 ["Deactivated"] = "ESP Deactivated.",
                 ["DoESP"] = "DoESP() took {0}ms (max: {1}ms) to execute!",
                 ["TrackerDisabled"] = "Player Tracker is disabled.",
@@ -2792,24 +2800,24 @@ namespace Oxide.Plugins
                 ["InvalidID"] = "{0} is not a valid steam id. Entry removed.",
                 ["BoxesAll"] = "Now showing all boxes.",
                 ["BoxesOnlineOnly"] = "Now showing online player boxes only.",
-                ["Help1"] = "<color=orange>Available Filters</color>: {0}",
-                ["Help2"] = "<color=orange>/{0} {1}</color> - Toggles showing online players boxes only when using the <color=red>box</color> filter.",
-                ["Help3"] = "<color=orange>/{0} {1}</color> - Toggles quick toggle UI on/off",
-                ["Help4"] = "<color=orange>/{0} {1}</color> - Draw on your screen the movement of nearby players. Must be enabled.",
-                ["Help5"] = "e.g: <color=orange>/{0} 1 1000 box loot stash</color>",
-                ["Help6"] = "e.g: <color=orange>/{0} 0.5 400 all</color>",
+                ["Help1"] = "<color=#FFA500>Available Filters</color>: {0}",
+                ["Help2"] = "<color=#FFA500>/{0} {1}</color> - Toggles showing online players boxes only when using the <color=#FF0000>box</color> filter.",
+                ["Help3"] = "<color=#FFA500>/{0} {1}</color> - Toggles quick toggle UI on/off",
+                ["Help4"] = "<color=#FFA500>/{0} {1}</color> - Draw on your screen the movement of nearby players. Must be enabled.",
+                ["Help5"] = "e.g: <color=#FFA500>/{0} 1 1000 box loot stash</color>",
+                ["Help6"] = "e.g: <color=#FFA500>/{0} 0.5 400 all</color>",
                 ["VisionOn"] = "You will now see where players are looking.",
                 ["VisionOff"] = "You will no longer see where players are looking.",
                 ["ExtendedPlayersOn"] = "Extended information for players is now on.",
                 ["ExtendedPlayersOff"] = "Extended information for players is now off.",
-                ["Help7"] = "<color=orange>/{0} {1}</color> - Toggles showing where players are looking.",
-                ["Help8"] = "<color=orange>/{0} {1}</color> - Toggles extended information for players.",
+                ["Help7"] = "<color=#FFA500>/{0} {1}</color> - Toggles showing where players are looking.",
+                ["Help8"] = "<color=#FFA500>/{0} {1}</color> - Toggles extended information for players.",
                 ["backpack"] = "backpack",
                 ["scientist"] = "scientist",
                 ["npc"] = "npc",
                 ["NoDrops"] = "No item drops found within {0}m",
-                ["Help9"] = "<color=orange>/{0} drops</color> - Show all dropped items within {1}m.",
-                ["Zombie"] = "<color=red>Zombie</color>",
+                ["Help9"] = "<color=#FFA500>/{0} drops</color> - Show all dropped items within {1}m.",
+                ["Zombie"] = "<color=#FF0000>Zombie</color>",
                 ["NoActiveRadars"] = "No one is using Radar at the moment.",
                 ["ActiveRadars"] = "Active radar users: {0}",
                 ["All"] = "All",
@@ -3026,6 +3034,30 @@ namespace Oxide.Plugins
         private string msg(string key, string id = null, params object[] args)
         {
             string message = id == null ? RemoveFormatting(lang.GetMessage(key, this, id)) : lang.GetMessage(key, this, id);
+
+            if (message.Contains("=blue"))
+                message = message.Replace("=blue", "=#0000FF");
+
+            if (message.Contains("=red"))
+                message = message.Replace("=red", "=#FF0000");
+
+            if (message.Contains("=yellow"))
+                message = message.Replace("=yellow", "=#FFFF00");
+
+            if (message.Contains("=lightblue"))
+                message = message.Replace("=lightblue", "=#ADD8E6");
+
+            if (message.Contains("=orange"))
+                message = message.Replace("=orange", "=#FFA500");
+
+            if (message.Contains("=silver"))
+                message = message.Replace("=silver", "=#C0C0C0");
+
+            if (message.Contains("=magenta"))
+                message = message.Replace("=magenta", "=#FF00FF");
+
+            if (message.Contains("=green"))
+                message = message.Replace("=green", "=#008000");
 
             return args.Length > 0 ? string.Format(message, args) : message;
         }

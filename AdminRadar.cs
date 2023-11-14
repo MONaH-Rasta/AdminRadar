@@ -12,7 +12,7 @@ using Random = UnityEngine.Random;
 
 namespace Oxide.Plugins
 {
-    [Info("Admin Radar", "nivex", "4.5.6")]
+    [Info("Admin Radar", "nivex", "4.5.7")]
     [Description("Radar tool for Admins and Developers.")]
     public class AdminRadar : RustPlugin
     {
@@ -442,6 +442,7 @@ namespace Oxide.Plugins
                 Dead,
                 GroupLimitHightlighting,
                 Heli,
+                MiniCopter,
                 Npc,
                 Ore,
                 RigidHullInflatableBoats,
@@ -594,6 +595,9 @@ namespace Oxide.Plugins
                     if (!ShowEntity(tick, EntityType.Boats, trackBoats))
                         return;
 
+                    if (!ShowEntity(tick, EntityType.MiniCopter, trackMiniCopter))
+                        return;
+
                     ShowCollectables(tick);
                 }
                 catch (Exception ex)
@@ -680,6 +684,11 @@ namespace Oxide.Plugins
                         case EntityType.Heli:
                             {
                                 trackHeli = false;
+                            }
+                            break;
+                        case EntityType.MiniCopter:
+                            {
+                                trackMiniCopter = false;
                             }
                             break;
                         case EntityType.Ore:
@@ -774,8 +783,10 @@ namespace Oxide.Plugins
                 {
                     double currDistance = Math.Floor(Vector3.Distance(target.transform.position, source.transform.position));
 
-                    if (player == target || currDistance > maxDistance || useBypass && ins.permission.UserHasPermission(target.UserIDString, permBypass))
+                    if (player == target || currDistance > maxDistance || ins.permission.UserHasPermission(target.UserIDString, permBypass))
+                    {
                         continue;
+                    }
 
                     var color = __(target.IsAlive() ? activeCC : activeDeadCC);
 
@@ -1203,7 +1214,7 @@ namespace Oxide.Plugins
 
                     string npcColor = target is HTNPlayer ? htnscientistCC : target.ShortPrefabName.Contains("peacekeeper") ? peacekeeperCC : target.name.Contains("scientist") ? scientistCC : target.ShortPrefabName == "murderer" ? murdererCC : npcCC;
 
-                    if (currDistance < playerDistance)
+                    if (currDistance < npcPlayerDistance)
                     {
                         string displayName = !string.IsNullOrEmpty(target.displayName) && target.displayName.All(char.IsLetter) ? target.displayName : target.ShortPrefabName == "scarecrow" ? ins.msg("scarecrow", player.UserIDString) : target.PrefabName.Contains("scientist") ? ins.msg("scientist", player.UserIDString) : target is NPCMurderer ? ins.msg("murderer", player.UserIDString) : ins.msg("npc", player.UserIDString);
 
@@ -1292,7 +1303,9 @@ namespace Oxide.Plugins
                     foreach (var e in entities.Where(target => target != null && target.transform != null && !target.IsDestroyed))
                     {
                         double currDistance = Math.Floor(Vector3.Distance(e.transform.position, source.transform.position));
-                        if ((entityType == EntityType.Boats || entityType == EntityType.Cars || entityType == EntityType.RigidHullInflatableBoats) && currDistance > 500f) continue;
+                        if ((entityType == EntityType.Boats || entityType == EntityType.RigidHullInflatableBoats) && currDistance > boatDistance) continue;
+                        if (entityType == EntityType.Cars && currDistance > carDistance) continue;
+                        if (entityType == EntityType.MiniCopter && currDistance > mcDistance) continue;
                         string info = e.Health() <= 0 ? entityName : string.Format("{0} <color={1}>{2}</color>", entityName, healthCC, e.Health() > 1000 ? Math.Floor(e.Health()).ToString("#,##0,K", CultureInfo.InvariantCulture) : Math.Floor(e.Health()).ToString("#0"));
                         if (drawText) player.SendConsoleCommand("ddraw.text", invokeTime + flickerDelay, __(bradleyCC), e.transform.position + new Vector3(0f, 2f, 0f), string.Format("{0} <color={1}>{2}</color>", info, distCC, currDistance));
                         if (drawBox) player.SendConsoleCommand("ddraw.box", invokeTime + flickerDelay, __(bradleyCC), e.transform.position + new Vector3(0f, 1f, 0f), GetScale(currDistance));
@@ -1341,6 +1354,12 @@ namespace Oxide.Plugins
                             entityName = "RB";
                         }
                         break;
+                    case EntityType.MiniCopter:
+                        {
+                            entities = cache.Entities.Where(e => e is MiniCopter).ToList();
+                            entityName = "MC";
+                        }
+                        break;
                 }
 
                 return entities;
@@ -1354,6 +1373,7 @@ namespace Oxide.Plugins
 
         private const string permName = "adminradar.allowed";
         private const string permBypass = "adminradar.bypass";
+        private const string permAuto = "adminradar.auto";
         private const string genericPrefab = "assets/prefabs/tools/map/genericradiusmarker.prefab";
         private const string vendingPrefab = "assets/prefabs/deployable/vendingmachine/vending_mapmarker.prefab";
         private const float flickerDelay = 0.05f;
@@ -1401,6 +1421,7 @@ namespace Oxide.Plugins
             cache = new Cache();
             permission.RegisterPermission(permName, this);
             permission.RegisterPermission(permBypass, this);
+            permission.RegisterPermission(permAuto, this);
         }
 
         private void OnServerInitialized()
@@ -1611,7 +1632,7 @@ namespace Oxide.Plugins
                 accessList.Add(player);
             }
 
-            if (player != null && player.IsConnected && player.GetComponent<Radar>() == null && permission.UserHasPermission(player.UserIDString, permName))
+            if (player != null && player.IsConnected && player.GetComponent<Radar>() == null && permission.UserHasPermission(player.UserIDString, permAuto) && HasAccess(player))
             {
                 cmdESP(player, "radar", new string[0]);
             }
@@ -2031,6 +2052,19 @@ namespace Oxide.Plugins
             }
             else if (entity is StorageContainer)
             {
+                if (entity is SupplyDrop)
+                {
+                    var supplyDrop = entity as SupplyDrop;
+
+                    if (!cache.SupplyDrops.Contains(supplyDrop))
+                    {
+                        cache.SupplyDrops.Add(supplyDrop);
+                        return true;
+                    }
+
+                    return false;
+                }
+
                 var container = entity as StorageContainer;
 
                 if (entity.name.Contains("turret"))
@@ -2132,19 +2166,17 @@ namespace Oxide.Plugins
 
                 return false;
             }
-            else if (entity is SupplyDrop)
+            else if (trackRigidHullInflatableBoats && entity is RHIB)
             {
-                var supplyDrop = entity as SupplyDrop;
-
-                if (!cache.SupplyDrops.Contains(supplyDrop))
+                if (!cache.Entities.Contains(entity))
                 {
-                    cache.SupplyDrops.Add(supplyDrop);
+                    cache.Entities.Add(entity);
                     return true;
                 }
 
                 return false;
             }
-            else if (trackRigidHullInflatableBoats && entity is RHIB)
+            else if (trackMiniCopter && entity is MiniCopter)
             {
                 if (!cache.Entities.Contains(entity))
                 {
@@ -2211,7 +2243,7 @@ namespace Oxide.Plugins
 
             cmdESP(player, "espgui", arg.Args);
         }
-
+        
         private bool HasAccess(BasePlayer player)
         {
             if (player == null)
@@ -2595,9 +2627,13 @@ namespace Oxide.Plugins
         private static float defaultInvokeTime;
         private static float defaultMaxDistance;
 
+        private static float mcDistance;
+        private static float carDistance;
+        private static float boatDistance;
         private static float adDistance;
         private static float boxDistance;
         private static float playerDistance;
+        private static float npcPlayerDistance;
         private static float tcDistance;
         private static float stashDistance;
         private static float corpseDistance;
@@ -2631,8 +2667,8 @@ namespace Oxide.Plugins
         private static int inactiveSeconds;
         private static int inactiveMinutes;
         private static bool showUI;
-        private static bool useBypass;
 
+        private static bool trackMiniCopter;
         private static bool trackHeli;
         private static bool trackBradley;
         private static bool trackCars;
@@ -2867,7 +2903,6 @@ namespace Oxide.Plugins
             inactiveSeconds = Convert.ToInt32(GetConfig("Settings", "Deactivate Radar After X Seconds Inactive", 300));
             inactiveMinutes = Convert.ToInt32(GetConfig("Settings", "Deactivate Radar After X Minutes", 0));
             showUI = Convert.ToBoolean(GetConfig("Settings", "User Interface Enabled", true));
-            useBypass = Convert.ToBoolean(GetConfig("Settings", "Use Bypass Permission", false));
 
             showLootContents = Convert.ToBoolean(GetConfig("Options", "Show Barrel And Crate Contents", false));
             showAirdropContents = Convert.ToBoolean(GetConfig("Options", "Show Airdrop Contents", false));
@@ -2886,6 +2921,9 @@ namespace Oxide.Plugins
             groupRange = Convert.ToSingle(GetConfig("Group Limit", "Range", 50f));
             groupCountHeight = Convert.ToSingle(GetConfig("Group Limit", "Height Offset [0.0 = disabled]", 0f));
 
+            mcDistance = Convert.ToSingle(GetConfig("Drawing Distances", "MiniCopter", 150f));
+            boatDistance = Convert.ToSingle(GetConfig("Drawing Distances", "Boats", 100f));
+            carDistance = Convert.ToSingle(GetConfig("Drawing Distances", "Cars", 500f));
             adDistance = Convert.ToSingle(GetConfig("Drawing Distances", "Airdrop Crates", 400f));
             npcDistance = Convert.ToSingle(GetConfig("Drawing Distances", "Animals", 200));
             bagDistance = Convert.ToSingle(GetConfig("Drawing Distances", "Sleeping Bags", 250));
@@ -2893,6 +2931,7 @@ namespace Oxide.Plugins
             colDistance = Convert.ToSingle(GetConfig("Drawing Distances", "Collectibles", 100));
             corpseDistance = Convert.ToSingle(GetConfig("Drawing Distances", "Player Corpses", 200));
             playerDistance = Convert.ToSingle(GetConfig("Drawing Distances", "Players", 500));
+            npcPlayerDistance = Convert.ToSingle(GetConfig("Drawing Distances", "NPC Players", 300));
             lootDistance = Convert.ToSingle(GetConfig("Drawing Distances", "Loot Containers", 150));
             oreDistance = Convert.ToSingle(GetConfig("Drawing Distances", "Resources (Ore)", 200));
             stashDistance = Convert.ToSingle(GetConfig("Drawing Distances", "Stashes", 250));
@@ -2902,6 +2941,7 @@ namespace Oxide.Plugins
             trackBradley = Convert.ToBoolean(GetConfig("Additional Tracking", "Bradley APC", true));
             trackCars = Convert.ToBoolean(GetConfig("Additional Tracking", "Cars", false));
             trackCargoShips = Convert.ToBoolean(GetConfig("Additional Tracking", "CargoShips", false));
+            trackMiniCopter = Convert.ToBoolean(GetConfig("Additional Tracking", "MiniCopter", false));
             trackHeli = Convert.ToBoolean(GetConfig("Additional Tracking", "Helicopters", true));
             showHeliRotorHealth = Convert.ToBoolean(GetConfig("Additional Tracking", "Helicopter Rotor Health", false));
             trackCH47 = Convert.ToBoolean(GetConfig("Additional Tracking", "CH47", false));

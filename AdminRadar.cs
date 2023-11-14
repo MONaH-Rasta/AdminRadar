@@ -4,7 +4,6 @@ using System.Collections;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
-using System.Reflection;
 using System.Text;
 using System.Text.RegularExpressions;
 using Facepunch;
@@ -17,17 +16,16 @@ using Rust;
 using UnityEngine;
 
 /*
-    Added `Color-Hex Codes` - `MiniCopter (ScrapTransportHelicopter)` (#ff00ff)
-    Added `Color-Hex Codes` - `MiniCopter` (#ff00ff)
-    Added hook API with no return behavior `void OnRadarActivated(BasePlayer player)`
-    Added hook API with no return behavior `void OnRadarDeactivated(BasePlayer player)`
-    Command `radar drops` will now work with permission adminradar.allowed
-    Possible fix for CreateUI
+    Fixed for Rust update
+    Fixed boat and horse filters UI
+    Prevent discord messages during plugin reload
+    Radar is no longer automatically activated for users when the plugin loads, unless radar was activated prior to the unload
+    - Users that want radar activated automatically must use the adminradar.auto permission
 */
 
 namespace Oxide.Plugins
 {
-    [Info("Admin Radar", "nivex", "5.0.8")]
+    [Info("Admin Radar", "nivex", "5.0.9")]
     [Description("Radar tool for Admins and Developers.")]
     class AdminRadar : RustPlugin
     {
@@ -44,7 +42,8 @@ namespace Oxide.Plugins
         private static AdminRadar ins;
         private StoredData storedData = new StoredData();
         private bool init; // don't use cache while false
-        private static bool isUnloading;
+        private bool isUnloading;
+        private float startupTime;
 
         private List<string> tags = new List<string>
             {"ore", "cluster", "1", "2", "3", "4", "5", "6", "_", ".", "-", "deployed", "wooden", "large", "pile", "prefab", "collectable", "loot", "small"}; // strip these from names to reduce the size of the text and make it more readable
@@ -164,6 +163,7 @@ namespace Oxide.Plugins
             public readonly List<string> Hidden = new List<string>();
             public readonly List<string> OnlineBoxes = new List<string>();
             public readonly List<string> Visions = new List<string>();
+            public readonly List<string> Active = new List<string>();
             public StoredData() { }
         }
 
@@ -250,6 +250,11 @@ namespace Oxide.Plugins
         private void AdminRadarDiscordMessage(string playerName, string playerId, bool state, Vector3 position)
         {
             if (!_sendDiscordMessages || DiscordMessages == null || !DiscordMessages.IsLoaded)
+            {
+                return;
+            }
+
+            if (Time.realtimeSinceStartup - startupTime < 5f || isUnloading)
             {
                 return;
             }
@@ -441,7 +446,7 @@ namespace Oxide.Plugins
 
                 ins.activeRadars.Remove(this);
 
-                if (ins.activeRadars.Count == 0 && !isUnloading) ins.Unsubscribe(nameof(OnEntityTakeDamage));
+                if (ins.activeRadars.Count == 0 && !ins.isUnloading) ins.Unsubscribe(nameof(OnEntityTakeDamage));
 
                 if (player != null && player.IsConnected)
                 {
@@ -491,6 +496,9 @@ namespace Oxide.Plugins
                         return showDead;
                     case "Heli":
                         return showHeli;
+                    case "Horse":
+                    case "Horses":
+                        return showRidableHorses;
                     case "Loot":
                         return showLoot;
                     case "MiniCopter":
@@ -556,7 +564,7 @@ namespace Oxide.Plugins
             {
                 do
                 {
-                    if (!player || !player.IsConnected || isUnloading)
+                    if (!player || !player.IsConnected || ins == null || ins.isUnloading)
                     {
                         Destroy(this);
                         yield break;
@@ -599,7 +607,7 @@ namespace Oxide.Plugins
             {
                 do
                 {
-                    if (!player || !player.IsConnected || isUnloading)
+                    if (!player || !player.IsConnected || ins == null || ins.isUnloading)
                     {
                         Destroy(this);
                         yield break;
@@ -1965,6 +1973,7 @@ namespace Oxide.Plugins
                             }
                             else if (entityType == EntityType.CH47Helicopters && !trackCH47 && !uiBtnCH47) continue;
 
+                            if (e is ScrapTransportHelicopter) entityName = "STH";
                             string info = e.Health() <= 0 ? entityName : string.Format("{0} <color={1}>{2}</color>", entityName, healthCC, e.Health() > 1000 ? Math.Floor(e.Health()).ToString("#,##0,K", CultureInfo.InvariantCulture) : Math.Floor(e.Health()).ToString("#0"));
                             Color color = e is ScrapTransportHelicopter ? __(scrapCC) : e is MiniCopter ? __(miniCC) : __(bradleyCC);
 
@@ -2088,6 +2097,7 @@ namespace Oxide.Plugins
 
         private void Init()
         {
+            startupTime = Time.realtimeSinceStartup;
             ins = this;
             _cachedStringBuilder = new CachedStringBuilder();
             Unsubscribe(nameof(OnEntityTakeDamage));
@@ -2155,9 +2165,9 @@ namespace Oxide.Plugins
 
             foreach (var player in BasePlayer.activePlayerList)
             {
-                if (player != null && player.IsConnected && permission.UserHasPermission(player.UserIDString, permAllowed))
+                if (storedData.Active.Contains(player.UserIDString))
                 {
-                    RadarCommand(player, "radar", new string[0]);
+                    RadarCommand(player, "radar", storedData.Filters.ContainsKey(player.UserIDString) ? storedData.Filters[player.UserIDString].ToArray() : new string[0]);
                 }
             }
         }
@@ -2630,7 +2640,7 @@ namespace Oxide.Plugins
                     return True;
                 }
             }
-            else if (trackCars && entity is BaseCar)
+            else if (trackCars && entity is BasicCar)
             {
                 if (!cache.Cars.Contains(entity))
                 {
@@ -2701,7 +2711,7 @@ namespace Oxide.Plugins
                 cache.Zombies.Remove(entity as Zombie);
             else if (entity is CargoShip)
                 cache.CargoShips.Remove(entity);
-            else if (entity is BaseCar)
+            else if (entity is BasicCar)
                 cache.Cars.Remove(entity);
             else if (entity is CH47Helicopter)
                 cache.CH47.Remove(entity);
@@ -2872,10 +2882,17 @@ namespace Oxide.Plugins
             if (!storedData.Filters.ContainsKey(player.UserIDString))
                 storedData.Filters.Add(player.UserIDString, list);
 
-            if (args.Length == 0 && player.GetComponent<Radar>())
+            if (args.Length == 0)
             {
-                UnityEngine.Object.Destroy(player.GetComponent<Radar>());
-                return;
+                foreach (var x in activeRadars)
+                {
+                    if (x.player == player)
+                    {
+                        storedData.Active.Remove(player.UserIDString);
+                        UnityEngine.Object.Destroy(x);
+                        return;
+                    }
+                }
             }
 
             args = list.ToArray();
@@ -3054,7 +3071,7 @@ namespace Oxide.Plugins
             bool showAll = isArg(args, "all");
             radar.showAll = showAll;
             radar.showBags = isArg(args, "bag") || showAll;
-            radar.showBoats = isArg(args, "boats") || (!uiBtnBoats && trackBoats);
+            radar.showBoats = isArg(args, "boats") || showAll || (!uiBtnBoats && trackBoats);
             radar.showBox = isArg(args, "box") || showAll;
             radar.showBradley = isArg(args, "bradley") || showAll || (!uiBtnBradley && trackBradley);
             radar.showCargoPlanes = isArg(args, "cargoplane") || showAll || (!uiBtnCargoPlanes && trackCargoPlanes);
@@ -3094,6 +3111,9 @@ namespace Oxide.Plugins
             radar.invokeTime = invokeTime;
             radar.maxDistance = maxDistance;
             radar.Start();
+
+            if (!storedData.Active.Contains(player.UserIDString))
+                storedData.Active.Add(player.UserIDString);
 
             if (command == "espgui" || !showToggleMessage)
                 return;
@@ -3835,6 +3855,7 @@ namespace Oxide.Plugins
             _messageColor = Convert.ToInt32(GetConfig("DiscordMessages", "Message - Embed Color (DECIMAL)", 3329330));
             _webhookUrl = Convert.ToString(GetConfig("DiscordMessages", "Message - Webhook URL", "https://support.discordapp.com/hc/en-us/articles/228383668-Intro-to-Webhooks"));
             _sendDiscordMessages = _webhookUrl != "https://support.discordapp.com/hc/en-us/articles/228383668-Intro-to-Webhooks";
+            if (string.IsNullOrEmpty(_webhookUrl)) _sendDiscordMessages = false;
 
             _embedMessageServer = Convert.ToString(GetConfig("DiscordMessages", "Embed_MessageServer", "Server"));
             _embedMessageLocation = Convert.ToString(GetConfig("DiscordMessages", "Embed_MessageLocation", "Location"));

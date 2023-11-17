@@ -19,7 +19,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("Admin Radar", "nivex", "5.3.3")]
+    [Info("Admin Radar", "nivex", "5.3.4")]
     [Description("Radar tool for Admins and Developers.")]
     internal class AdminRadar : RustPlugin
     {
@@ -102,9 +102,8 @@ namespace Oxide.Plugins
                 {
                     return False;
                 }
-                if (entity is BasePlayer)
+                if (entity is BasePlayer player)
                 {
-                    var player = entity as BasePlayer;
                     Interface.Oxide.NextTick(() =>
                     {
                         if (!player.IsValid() || player.IsDestroyed)
@@ -124,9 +123,8 @@ namespace Oxide.Plugins
                     });
                     return False;
                 }
-                if (config.Core.Dead && entity is PlayerCorpse)
+                if (config.Core.Dead && entity is PlayerCorpse corpse)
                 {
-                    PlayerCorpse corpse = entity as PlayerCorpse;
                     Interface.Oxide.NextTick(() =>
                     {
                         if (corpse.IsValid() && !corpse.IsDestroyed && corpse.playerSteamID.IsSteamId())
@@ -159,7 +157,7 @@ namespace Oxide.Plugins
                 {
                     return True;
                 }
-                if ((config.Core.Loot || config.Core.Box) && entity is StorageContainer && TryGetContainerType(entity, out entityType) && Add_Internal<StorageContainer, EntityInfo>(Containers, entity, entityType))
+                if ((config.Core.Loot || config.Core.Box || config.Core.Stash) && entity is StorageContainer && TryGetContainerType(entity, out entityType) && Add_Internal<StorageContainer, EntityInfo>(Containers, entity, entityType))
                 {
                     return True;
                 }
@@ -241,6 +239,7 @@ namespace Oxide.Plugins
             private bool TryGetContainerType(BaseEntity entity, out EntityType type)
             {
                 if (entity is LockedByEntCrate || IsLoot(entity)) { type = EntityType.Loot; return True; }
+                if (entity is StashContainer) { type = EntityType.Stash; return True; }
                 if (IsBox(entity)) { type = EntityType.Box; return True; }
                 type = (EntityType)0;
                 return False;
@@ -457,21 +456,11 @@ namespace Oxide.Plugins
             public string name;
             public object info;
             public float dist;
+            public float sqrdist;
             public float size = 0.5f;
+            public Transform t;
             public Network.Visibility.Group group => entity?.net?.group;
-            public Vector3 from => (IsInvalid ? _from : _from = entity.transform.position) + offset;
-            public bool IsInvalid
-            {
-                get
-                {
-                    if (entity == null || entity.net == null || entity.IsDestroyed)
-                    {
-                        return true;
-                    }
-                    _from = entity.transform.position;
-                    return false;
-                }
-            }
+            public Vector3 from => (!t ? _from : _from = t.position) + offset;
             public EntityInfo() { }
             public EntityInfo(BaseEntity entity, EntityType type, Func<EntityType, BaseEntity, float> getDistance, Func<string, string> stripTags = null)
             {
@@ -482,6 +471,7 @@ namespace Oxide.Plugins
                 if (getDistance != null)
                 {
                     dist = getDistance(type, entity);
+                    sqrdist = dist * dist;
                 }
                 if (type == EntityType.TC)
                 {
@@ -489,7 +479,8 @@ namespace Oxide.Plugins
                 }
                 this.type = type;
                 this.entity = entity;
-                _from = entity.transform.position;
+                t = entity.transform;
+                _from = t.position;
             }
         }
 
@@ -512,7 +503,7 @@ namespace Oxide.Plugins
                 }
                 public void SetEnabled(Network.Visibility.Group group, Vector3 to, float max)
                 {
-                    disabled = ei.group != group && (ei.from - to).magnitude > Mathf.Max(max, ei.dist);
+                    disabled = ei.group != group && (ei.from - to).sqrMagnitude > Mathf.Max(max * max, ei.sqrdist);
                 }
                 public bool IsOfType(EntityType type)
                 {
@@ -570,7 +561,13 @@ namespace Oxide.Plugins
             internal Cache Cache => instance.cache;
             internal Configuration config => instance.config;
             internal float delay => invokeTime + 0.05f;
-            internal float Distance(Vector3 a) => Mathf.CeilToInt((a - position).magnitude);
+
+            internal float Distance(Vector3 a)
+            {
+                float sqrMagnitude = (a - position).sqrMagnitude;
+
+                return Mathf.Ceil(Mathf.Sqrt(sqrMagnitude));
+            }
 
             public Vector3 limitUp;
             public Vector3 halfUp = new Vector3(0f, 0.5f);
@@ -1201,7 +1198,7 @@ namespace Oxide.Plugins
 
             private float SetDistance(Vector3 a)
             {
-                return currDistance = Distance(a);
+                return currDistance = (a - position).magnitude;
             }
 
             private DataObject SetDataObject(EntityInfo ei)
@@ -1216,7 +1213,7 @@ namespace Oxide.Plugins
 
             private bool IsValid(EntityInfo ei, float dist)
             {
-                if (ei.IsInvalid || HasDataObject(ei.entity))
+                if (!ei.t || HasDataObject(ei.entity))
                 {
                     return False;
                 }
@@ -1257,8 +1254,7 @@ namespace Oxide.Plugins
 
                 var nid = target.net.ID;
 
-                DataObject obj;
-                if (!data.TryGetValue(nid, out obj))
+                if (!data.TryGetValue(nid, out var obj))
                 {
                     data[nid] = obj = Pool.Get<DataObject>();
                 }
@@ -1332,8 +1328,7 @@ namespace Oxide.Plugins
 
                 var nid = target.net.ID;
 
-                DataObject obj;
-                if (!data.TryGetValue(nid, out obj))
+                if (!data.TryGetValue(nid, out var obj))
                 {
                     data[nid] = obj = Pool.Get<DataObject>();
                 }
@@ -1470,11 +1465,11 @@ namespace Oxide.Plugins
 
                 var groups = Pool.Get<Dictionary<int, List<DistantPlayer>>>();
 
-                int j = 0, k, i;
 
                 try
                 {
                     float sqrMagnitude = config.Limit.Range * config.Limit.Range;
+                    int j = 0, k, i;
 
                     for (; j < distant.Count; j++)
                     {
@@ -1569,19 +1564,24 @@ namespace Oxide.Plugins
                 {
                     groups.ResetToPool();
 
-                    for (i = distant.Count - 1; i >= 0; i--)
-                    {
-                        var obj = distant[i];
-                        if (obj != null)
-                        {
-                            obj.Reset();
-                            Pool.Free(ref obj);
-                        }
-                        distant[i] = null;
-                    }
-
-                    distant.Clear();
+                    ClearDistantPlayers();
                 }
+            }
+
+            private void ClearDistantPlayers()
+            {
+                for (int i = distant.Count - 1; i >= 0; i--)
+                {
+                    var obj = distant[i];
+                    if (obj != null)
+                    {
+                        obj.Reset();
+                        Pool.Free(ref obj);
+                    }
+                    distant[i] = null;
+                }
+
+                distant.Clear();
             }
 
             private void DrawCupboardArrows(BasePlayer target, EntityType lastType)
@@ -2159,11 +2159,11 @@ namespace Oxide.Plugins
                     {
                         return true;
                     }
-                    if (position.y > 0f && ei._from.y < 0f)
+                    if (position.y > 0f && ei._from.y < -3f)
                     {
                         return false;
                     }
-                    if (ei._from.y > 0f && position.y < 0f)
+                    if (ei._from.y > 0f && position.y < -3f)
                     {
                         return false;
                     }
@@ -2299,7 +2299,7 @@ namespace Oxide.Plugins
                 {
                     checks++;
 
-                    if (ei.IsInvalid || HasDataObject(ei.entity))
+                    if (!ei.t || HasDataObject(ei.entity))
                     {
                         return;
                     }

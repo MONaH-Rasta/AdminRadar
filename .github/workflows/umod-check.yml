@@ -50,7 +50,7 @@ jobs:
             # Create GitHub release
             gh release create "v${plugin_version}" ${PLUGIN_NAME}.cs \
               --title "${PLUGIN_NAME} v${plugin_version}" \
-              --notes "Automatic release of new version from the plugin file."
+              --notes "Automatic release of new version from uMod."
           else
             echo "No new version"
           fi

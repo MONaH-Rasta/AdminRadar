@@ -23,7 +23,7 @@ namespace Oxide.Plugins
     [Description("Radar tool for Admins and Developers.")]
     internal class AdminRadar : RustPlugin
     {
-        [PluginReference] Plugin Clans, Backpacks, DiscordMessages;
+        [PluginReference] readonly Plugin Clans, Backpacks, DiscordMessages;
 
         [Flags] public enum DrawFlags { None = 0, Arrow = 1 << 1, Box = 1 << 2, Text = 1 << 3, }
         public enum EntityType { Active, Airdrop, Bag, Backpack, Boat, Bradley, Car, CargoPlane, CargoShip, CCTV, CH47, Box, Col, TC, TCArrow, Dead, Limit, Loot, Heli, Mini, MLRS, Npc, Ore, Horse, RHIB, Sleeper, Stash, Trap, Turret }

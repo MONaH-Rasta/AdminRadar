@@ -23,7 +23,7 @@ jobs:
           curl -O "https://umod.org/plugins/${PLUGIN_NAME}.cs"
 
           # Extract the version from the Info attribute in the file
-          plugin_version=$(sed -n 's/.*\[Info(".*", ".*", "\([^"]*\)").*/\1/p' ${PLUGIN_NAME}.cs)
+          plugin_version=$(sed -n 's/.*\[Info(".*", ".*", "\(.*\)",.*/\1/p' ${PLUGIN_NAME}.cs)
           echo "Plugin version in file: $plugin_version"
 
           # Get latest GitHub release version

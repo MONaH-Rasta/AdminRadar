@@ -7,7 +7,7 @@ using Oxide.Core;
 using Oxide.Core.Libraries.Covalence;
 using Oxide.Core.Plugins;
 using Oxide.Game.Rust.Cui;
-using Oxide.Plugins.AdminRadarExtensionMethods;
+using Rust.Ai.Gen2;
 using System;
 using System.Collections;
 using System.Collections.Generic;
@@ -16,17 +16,18 @@ using System.Globalization;
 using System.Text;
 using System.Text.RegularExpressions;
 using UnityEngine;
+using static Oxide.Plugins.AdminRadarExtensionMethods.ExtensionMethods;
 
 namespace Oxide.Plugins
 {
-    [Info("Admin Radar", "nivex", "5.3.6")]
+    [Info("Admin Radar", "nivex", "5.3.7")]
     [Description("Radar tool for Admins and Developers.")]
     internal class AdminRadar : RustPlugin
     {
         [PluginReference] Plugin Clans, Backpacks, DiscordMessages;
 
         [Flags] public enum DrawFlags { None = 0, Arrow = 1 << 1, Box = 1 << 2, Text = 1 << 3, }
-        public enum EntityType { Active, Airdrop, Bag, Backpack, Boat, Bradley, Car, CargoPlane, CargoShip, CCTV, CH47, Box, Col, TC, TCArrow, Dead, Limit, Loot, Heli, Mini, MLRS, Npc, Ore, Horse, RHIB, Sleeper, Stash, Trap, Turret }
+        public enum EntityType { Active, Airdrop, Bag, Backpack, Boat, Bradley, Car, CargoPlane, CargoShip, CCTV, CH47, Box, Col, TC, TCArrow, Dead, Drop, Limit, Loot, Heli, Mini, MLRS, Npc, Ore, Horse, RHIB, Sleeper, Stash, Trap, Turret }
         private List<string> _tags = new() { "ore", "cluster", "1", "2", "3", "4", "5", "6", "_", ".", "-", "deployed", "wooden", "large", "pile", "prefab", "collectable", "loot", "small" };
         private List<EntityType> _errorTypes = new();
         private List<Radar> _radars = new();
@@ -60,6 +61,20 @@ namespace Oxide.Plugins
             public List<string> Visions = new();
             public List<string> Active = new();
             public StoredData() { }
+            public void Init()
+            {
+                Offsets ??= new();
+                EntityTextSize ??= new();
+                EntityNameSize ??= new();
+                PlayerTextSize ??= new();
+                PlayerNameSize ??= new();
+                Extended ??= new();
+                Filters ??= new();
+                Hidden ??= new();
+                OnlineBoxes ??= new();
+                Visions ??= new();
+                Active ??= new();
+            }
         }
 
         private class Cache
@@ -88,6 +103,7 @@ namespace Oxide.Plugins
             public Dictionary<NetworkableId, EntityInfo> Collectibles { get; private set; } = new();
             public Dictionary<NetworkableId, EntityInfo> Containers { get; private set; } = new();
             public Dictionary<NetworkableId, EntityInfo> Corpses { get; private set; } = new();
+            public Dictionary<NetworkableId, EntityInfo> Drops { get; private set; } = new();
             public Dictionary<NetworkableId, EntityInfo> Helicopters { get; private set; } = new();
             public Dictionary<NetworkableId, EntityInfo> MiniCopter { get; private set; } = new();
             public Dictionary<NetworkableId, EntityInfo> MLRS { get; private set; } = new();
@@ -103,6 +119,10 @@ namespace Oxide.Plugins
                 if (entity.IsKilled())
                 {
                     return false;
+                }
+                if (IsDrop(entity))
+                {
+                    Add_Internal<BaseEntity, EntityInfo>(Drops, entity, EntityType.Drop);
                 }
                 if (entity is BasePlayer player)
                 {
@@ -146,6 +166,10 @@ namespace Oxide.Plugins
                     return true;
                 }
                 if (config.Core.Animals && Add_Internal<BaseNpc, EntityInfo>(Animals, entity, EntityType.Npc))
+                {
+                    return true;
+                }
+                if (config.Core.Animals && Add_Internal<BaseNPC2, EntityInfo>(Animals, entity, EntityType.Npc))
                 {
                     return true;
                 }
@@ -328,6 +352,14 @@ namespace Oxide.Plugins
                 instance.Puts(StringBuilderCache.GetStringAndRelease(sb));
             }
 #endif
+            public bool IsDrop(BaseEntity entity)
+            {
+                if (entity is DroppedItem || entity is Landmine || entity is BearTrap || entity is DroppedItemContainer || entity is RFTimedExplosive)
+                {
+                    return !config.Settings.DropExceptions.Exists(entity.ShortPrefabName.Contains);
+                }
+                return false;
+            }
 
             public bool IsTrap(BaseNetworkable entity)
             {
@@ -460,7 +492,7 @@ namespace Oxide.Plugins
             public float size = 0.5f;
             public Transform t;
             public Network.Visibility.Group group => entity?.net?.group;
-            public Vector3 from => (!t ? _from : _from = t.position) + offset;
+            public Vector3 from => (t == null ? _from : _from = t.position) + offset;
             public EntityInfo() { }
             public EntityInfo(BaseEntity entity, EntityType type, Func<EntityType, BaseEntity, float> getDistance, Func<string, string> stripTags = null)
             {
@@ -779,6 +811,7 @@ namespace Oxide.Plugins
                 SetupFilter(EntityType.Npc, ShowNPC);
                 SetupFilter(EntityType.CCTV, ShowCCTV);
                 SetupFilter(EntityType.Dead, ShowDead);
+                SetupFilter(EntityType.Drop, ShowDrops);
                 SetupFilter(EntityType.Heli, ShowHeli);
                 SetupFilter(EntityType.Loot, ShowLoot);
                 SetupFilter(EntityType.Stash, ShowStash);
@@ -1175,13 +1208,12 @@ namespace Oxide.Plugins
                 {
                     return string.Empty;
                 }
-                List<Item> itemList = Pool.Get<List<Item>>();
+                using var itemList = DisposableList<Item>.Get();
                 foreach (ItemContainer container in containers)
                 {
                     itemList.AddRange(container.itemList);
                 }
                 string contents = GetContents(itemList, num);
-                itemList.ResetToPool();
                 return contents;
             }
 
@@ -1241,7 +1273,7 @@ namespace Oxide.Plugins
 
             private bool IsValid(EntityInfo ei, float dist)
             {
-                if (!ei.t || !ei.entity.IsValid() || HasDataObject(ei.entity))
+                if (ei.t == null || !ei.entity.IsValid() || HasDataObject(ei.entity))
                 {
                     return false;
                 }
@@ -1292,7 +1324,12 @@ namespace Oxide.Plugins
 
                 CacheText(obj, Color.green, Vector3.zero, () =>
                 {
-                    if (target.IsKilled() || !target.IsConnected)
+                    if (target.IsKilled())
+                    {
+                        return;
+                    }
+
+                    if (!target.IsConnected)
                     {
                         TryCacheSleepingPlayer(target);
                         return;
@@ -1441,10 +1478,10 @@ namespace Oxide.Plugins
                             sb.Append(" (");
                             item.contents.itemList.ForEach(con =>
                             {
-                                sb.Append(instance.m(config.Options.Abbr ? string.Concat(con.info.displayName.english.Where(abbr)) : con.info.displayName.english, userid)).Append("|");
+                                sb.Append(instance.m(config.Options.Abbr ? string.Concat(con.info.displayName.english.Where(abbr)) : con.info.displayName.english, userid)).Append('|');
                             });
                             sb.Length -= 1;
-                            sb.Append(")");
+                            sb.Append(')');
                         }
                     }
                 }
@@ -1454,11 +1491,20 @@ namespace Oxide.Plugins
                 }
                 if (config.Additional.BackpackPlugin && API_GetExistingBackpacks(target.userID))
                 {
-                    sb.Append("*");
+                    sb.Append('*');
                 }
-                if (!string.IsNullOrEmpty(config.Settings.New) && instance.permission.UserHasGroup(target.UserIDString, config.Settings.New))
+                if (!string.IsNullOrEmpty(config.Settings.New) && !string.IsNullOrEmpty(config.Settings.NewText))
                 {
-                    sb.Append(config.Settings.NewText);
+                    string[] groups = config.Settings.New.Split(',');
+                    int index = Array.FindIndex(groups, group => instance.permission.UserHasGroup(target.UserIDString, group.Trim()));
+                    if (index != -1)
+                    {
+                        string[] texts = config.Settings.NewText.Split(",");
+                        if (index < texts.Length && !string.IsNullOrWhiteSpace(texts[index]))
+                        {
+                            sb.Append(texts[index].Trim());
+                        }
+                    }
                 }
                 if (instance._clanColors.TryGetValue(instance.GetClanOf(target.userID), out var clan) && !config.Settings.ApplySameColor)
                 {
@@ -1501,7 +1547,6 @@ namespace Oxide.Plugins
                 currType = EntityType.Limit;
 
                 var groups = Pool.Get<Dictionary<int, List<DistantPlayer>>>();
-
 
                 try
                 {
@@ -2093,6 +2138,41 @@ namespace Oxide.Plugins
                 }
             }
 
+            private void ShowDrops()
+            {
+                foreach (var ci in Cache.Drops.Values)
+                {
+                    CacheDrop(ci);
+                }
+            }
+
+            private void CacheDrop(EntityInfo ei)
+            {
+                try
+                {
+                    currType = EntityType.Drop;
+
+                    if (IsValid(ei, config.Distance.Drops))
+                    {
+                        var entity = ei.entity;
+                        var shortname = entity is DroppedItem drop ? drop?.item?.info.shortname ?? entity.ShortPrefabName : entity.ShortPrefabName;
+                        var obj = SetDataObject(ei);
+                        var color = Color.red;
+
+                        CacheText(obj, color, halfUp, () =>
+                        {
+                            ei.info = Format(ei.name, $"{shortname} <color=#FFFF00>{currDistance}</color>");
+                        });
+                    }
+
+                    checks++;
+                }
+                catch (Exception ex)
+                {
+                    HandleException(ex);
+                }
+            }
+
             private void ShowNPC()
             {
                 if (config.Core.NPCPlayer)
@@ -2406,6 +2486,7 @@ namespace Oxide.Plugins
                     }
 
                     entityName = instance.m(ei.entity is ScrapTransportHelicopter ? "STH" : ei.entity is BaseSubmarine ? "SUB" : ei.entity is Tugboat ? "TB" : ei.entity is BaseBoat ? "RB" : string.Concat(entityName.Where(char.IsUpper)), userid);
+                    
                     var color = __(ei.entity is ScrapTransportHelicopter ? config.Hex.STH : config.Hex.Get(entityType));
                     var obj = SetDataObject(ei);
 
@@ -2532,6 +2613,7 @@ namespace Oxide.Plugins
                 }
 
                 yield return CreateCoroutine(AddElementsToCache<BaseNpc>(_coroutineTimer, cache.Animals, EntityType.Npc));
+                yield return CreateCoroutine(AddElementsToCache<BaseNPC2>(_coroutineTimer, cache.Animals, EntityType.Npc));
                 yield return CreateCoroutine(AddElementsToCache<SimpleShark>(_coroutineTimer, cache.Animals, EntityType.Npc));
                 cached += cache.Animals.Count;
 
@@ -2684,6 +2766,17 @@ namespace Oxide.Plugins
                 cached += cache.Traps.Count;
             }
 
+            if (config.Distance.Drops > 0)
+            {
+                Func<BaseEntity, bool> condition = entity =>
+                {
+                    return cache.IsDrop(entity);
+                };
+
+                yield return CreateCoroutine(AddElementsToCache<BaseEntity>(_coroutineTimer, cache.Drops, EntityType.Drop, condition));
+                cached += cache.Drops.Count;
+            }
+
             if (config.Additional.MLRS)
             {
                 yield return CreateCoroutine(AddElementsToCache<MLRSRocket>(_coroutineTimer, cache.MLRS, EntityType.MLRS));
@@ -2736,7 +2829,7 @@ namespace Oxide.Plugins
 #if DEBUG
             Puts($"Start Remove {typeof(TType)}");
 #endif
-            List<NetworkableId> toRemove = Pool.Get<List<NetworkableId>>();
+            using var toRemove = DisposableList<NetworkableId>.Get();
             var checks = 0;
             foreach (var (id, entity) in _allEntities)
             {
@@ -2767,7 +2860,6 @@ namespace Oxide.Plugins
 #if DEBUG
             Puts($"End Remove {typeof(TType)}");
 #endif
-            toRemove.ResetToPool();
             //Puts("RemoveElementsFromList");
             _coroutines.Pop();
         }
@@ -2784,18 +2876,18 @@ namespace Oxide.Plugins
             Puts($"Start Caching {typeof(TType)}");
 #endif
 
-            List<NetworkableId> idsToRemove = Pool.Get<List<NetworkableId>>();
+            using var toRemove = DisposableList<NetworkableId>.Get();
             var checks = 0;
             foreach (var (id, entity) in _allEntities)
             {
                 if (entity.IsKilled())
                 {
-                    idsToRemove.Add(id);
+                    toRemove.Add(id);
                 }
                 else if (entity is TType && !cachedList.TryGetValue(id, out var ei) && (condition == null || condition(entity)))
                 {
                     cachedList[id] = ei = getCacheInfoFunc(entity);
-                    idsToRemove.Add(id);
+                    toRemove.Add(id);
                     TryCacheByType(ei.type, ei);
                 }
                 if (checks % 10 == 0 && timer.ShouldYield())
@@ -2806,7 +2898,7 @@ namespace Oxide.Plugins
                 checks++;
             }
 
-            foreach (var key in idsToRemove)
+            foreach (var key in toRemove)
             {
                 _allEntities.Remove(key);
                 if (checks % 10 == 0 && timer.ShouldYield())
@@ -2820,7 +2912,6 @@ namespace Oxide.Plugins
 #if DEBUG
             Puts($"End Caching {typeof(TType)}");
 #endif
-            idsToRemove.ResetToPool();
             //Puts("AddElementsToCacheWithInfo");
             _coroutines.Pop();
         }
@@ -2836,18 +2927,18 @@ namespace Oxide.Plugins
 #if DEBUG
             Puts($"Start Caching {typeof(TLookFor)}");
 #endif
-            List<NetworkableId> idsToRemove = Pool.Get<List<NetworkableId>>();
+            using var toRemove = DisposableList<NetworkableId>.Get();
             var checks = 0;
             foreach (var (id, entity) in _allEntities)
             {
                 if (entity.IsKilled())
                 {
-                    idsToRemove.Add(id);
+                    toRemove.Add(id);
                 }
                 else if (entity is TLookFor && !cachedList.TryGetValue(id, out var ei) && (condition == null || condition(entity)))
                 {
                     cachedList[id] = ei = new(entity, type, config.Distance.Get, StripTags);
-                    idsToRemove.Add(id);
+                    toRemove.Add(id);
                     TryCacheByType(ei.type, ei);
                 }
                 if (checks % 10 == 0 && timer.ShouldYield())
@@ -2858,7 +2949,7 @@ namespace Oxide.Plugins
                 checks++;
             }
 
-            foreach (var key in idsToRemove)
+            foreach (var key in toRemove)
             {
                 _allEntities.Remove(key);
                 if (checks % 10 == 0 && timer.ShouldYield())
@@ -2872,7 +2963,6 @@ namespace Oxide.Plugins
 #if DEBUG
             Puts($"End Caching {typeof(TLookFor)}");
 #endif
-            idsToRemove.ResetToPool();
             //Puts("AddElementsToCache");
             _coroutines.Pop();
         }
@@ -2885,7 +2975,7 @@ namespace Oxide.Plugins
 
             var player = arg.Player();
 
-            if (!player || !HasAccess(player))
+            if (player == null || !HasAccess(player))
                 return;
 
             if (arg.Args.Contains(config.GUI.Arrow) || arg.Args.Contains("move"))
@@ -2941,7 +3031,7 @@ namespace Oxide.Plugins
         {
             var player = user.Object as BasePlayer;
 
-            if (!player)
+            if (player == null)
             {
                 user.Message("Not a player!");
                 return;
@@ -3004,9 +3094,9 @@ namespace Oxide.Plugins
 
         private void RadarCommandY(BasePlayer player, string command, string[] args)
         {
-            args = args.ToLower(x => x != "true");
+            args = args.ToLower(x => x.ToLower() != "true");
 
-            if (!data.Filters.TryGetValue(player.UserIDString, out List<string> filters))
+            if (!data.Filters.TryGetValue(player.UserIDString, out var filters))
             {
                 data.Filters.Add(player.UserIDString, filters = new());
             }
@@ -3049,7 +3139,12 @@ namespace Oxide.Plugins
                         {
                             if (config.Options.DropsDrawTime > 0)
                             {
-                                _coroutines.Push(ServerMgr.Instance.StartCoroutine(DrawDropsRoutine(player)));
+                                float distance = config.Distance.Drops;
+                                if (args.Length == 2 && float.TryParse(args[1], out var result))
+                                {
+                                    distance = result;
+                                }
+                                DrawDrops(player, distance);
                             }
                         }
                         return;
@@ -3074,7 +3169,7 @@ namespace Oxide.Plugins
                     case "find":
                         if (args.Length > 1 && config.Options.FindDrawTime > 0)
                         {
-                            _coroutines.Push(ServerMgr.Instance.StartCoroutine(DrawObjectsRoutine(player, args[1])));
+                            _coroutines.Push(ServerMgr.Instance.StartCoroutine(DrawObjectsRoutine(player, args)));
                         }
                         return;
                     case "online":
@@ -3631,7 +3726,7 @@ namespace Oxide.Plugins
 
         private bool HasAccess(BasePlayer player)
         {
-            if (!player)
+            if (player == null)
                 return false;
 
             if (DeveloperList.Contains(player.userID))
@@ -3660,7 +3755,7 @@ namespace Oxide.Plugins
 
         private void DrawBuildings(BasePlayer player, bool showNonPlayerBases, bool showTwigOnly)
         {
-            var objects = Pool.Get<List<object[]>>();
+            using var objects = DisposableList<object[]>.Get();
             foreach (var building in BuildingManager.server.buildingDictionary.Values)
             {
                 if (!building.HasBuildingBlocks()) continue;
@@ -3687,16 +3782,17 @@ namespace Oxide.Plugins
                 });
             }
             Message(player, "ProcessRequestFinished", objects.Count);
-            objects.ResetToPool();
         }
 
         private IEnumerator FindByIDRoutine(BasePlayer player, ulong userID)
         {
             Message(player, "ProcessRequest");
             int checks = 0;
-            var objects = Pool.Get<List<object[]>>();
-            foreach (BaseEntity entity in BaseNetworkable.serverEntities.OfType<BaseEntity>())
+            using var objects = DisposableList<object[]>.Get();
+            foreach (BaseNetworkable net in BaseNetworkable.serverEntities)
             {
+                var entity = net as BaseEntity;
+                if (entity == null) continue;
                 if (entity is BuildingPrivlidge priv && priv.IsAuthed(userID))
                 {
                     objects.Add(new object[2] { Color.cyan, entity.transform.position });
@@ -3726,24 +3822,70 @@ namespace Oxide.Plugins
                 }
             });
             Message(player, "ProcessRequestFinished", objects.Count);
-            objects.ResetToPool();
         }
 
-        private IEnumerator DrawObjectsRoutine(BasePlayer player, string value)
+        private const float CHUNK_SIZE = 1000f;
+
+        private List<Collider> FindMapColliders(BasePlayer player)
+        {
+            List<Collider> colliders = Pool.Get<List<Collider>>();
+            using var chunk = DisposableList<Collider>.Get();
+
+            for (float x = 0; x < World.Size; x += CHUNK_SIZE)
+            {
+                for (float z = 0; z < World.Size; z += CHUNK_SIZE)
+                {
+                    chunk.Clear();
+
+                    float normX = TerrainMeta.NormalizeX(x);
+                    float normZ = TerrainMeta.NormalizeZ(z);
+                    float y = TerrainMeta.HeightMap.GetHeight(normX, normZ);
+
+                    Vis.Colliders(new Vector3(x, y, z), CHUNK_SIZE, chunk);
+
+                    colliders.AddRange(chunk);
+                }
+            }
+
+            return colliders;
+        }
+
+        private IEnumerator DrawObjectsRoutine(BasePlayer player, string[] args)
         {
             Message(player, "ProcessRequest");
             int checks = 0;
-            var objects = Pool.Get<List<object[]>>();
+            using var objects = DisposableList<object[]>.Get();
             bool test = ConVar.Server.hostname.Contains("Test Server");
-            foreach (var e in BaseNetworkable.serverEntities)
+            string[] split = args[1].Split(':');
+            if (split[0] == "asset" && player.Connection.authLevel >= 2)
             {
-                if (e.ShortPrefabName.Contains(value, CompareOptions.OrdinalIgnoreCase) || value == "electrical" && e is IOEntity)
+                var colliders = FindMapColliders(player);
+                foreach (var collider in colliders)
                 {
-                    objects.Add(new object[3] { e.transform.position, e.ShortPrefabName, Mathf.CeilToInt(Vector3.Distance(e.transform.position, player.transform.position)) });
+                    if (collider.name.Contains(split[1], CompareOptions.OrdinalIgnoreCase))
+                    {
+                        objects.Add(new object[3] { collider.transform.position, collider.name, Mathf.CeilToInt(Vector3.Distance(collider.transform.position, player.transform.position)) });
+                    }
+                    if (!test && ++checks % 1000 == 0)
+                    {
+                        yield return CoroutineEx.waitForSeconds(0.0025f);
+                    }
                 }
-                if (!test && ++checks % 200 == 0)
+                Pool.FreeUnmanaged(ref colliders);
+            }
+            else
+            {
+                foreach (var e in BaseNetworkable.serverEntities)
                 {
-                    yield return CoroutineEx.waitForSeconds(0.0025f);
+                    var ent = e as BaseEntity;
+                    if (e.ShortPrefabName.Contains(split[0], CompareOptions.OrdinalIgnoreCase) || split[0] == "electrical" && e is IOEntity)
+                    {
+                        objects.Add(new object[3] { e.transform.position, e.ShortPrefabName + " (" + (ent?.OwnerID ?? 0) + ")", Mathf.CeilToInt(Vector3.Distance(e.transform.position, player.transform.position)) });
+                    }
+                    if (!test && ++checks % 1000 == 0)
+                    {
+                        yield return CoroutineEx.waitForSeconds(0.0025f);
+                    }
                 }
             }
             AdminCommand(player, () =>
@@ -3754,33 +3896,26 @@ namespace Oxide.Plugins
                 }
             });
             Message(player, "ProcessRequestFinished", objects.Count);
-            objects.ResetToPool();
         }
 
-        private IEnumerator DrawDropsRoutine(BasePlayer player)
+        private void DrawDrops(BasePlayer player, float maxDistance)
         {
-            Message(player, "ProcessRequest");
-            int checks = 0;
-            var objects = Pool.Get<List<object[]>>();
-            bool test = ConVar.Server.hostname.Contains("Test Server");
-            foreach (var entity in BaseNetworkable.serverEntities)
+            using var objects = DisposableList<object[]>.Get();
+            if (!data.EntityTextSize.TryGetValue(player.UserIDString, out var entityTextSize))
             {
-                if (entity is DroppedItem || entity is Landmine || entity is BearTrap || entity is DroppedItemContainer || entity is RFTimedExplosive)
+                entityTextSize = config.Settings.EntityTextSize;
+            }
+            foreach (var ei in cache.Drops.Values)
+            {
+                if (ei.t == null || !ei.entity.IsValid())
                 {
-                    if (config.Settings.DropExceptions.Exists(entity.ShortPrefabName.Contains))
-                    {
-                        continue;
-                    }
-                    var currDistance = Mathf.CeilToInt(Vector3.Distance(entity.transform.position, player.transform.position));
-                    if (currDistance <= config.Distance.Drops)
-                    {
-                        var shortname = entity is DroppedItem drop ? drop?.item?.info.shortname ?? entity.ShortPrefabName : entity.ShortPrefabName;
-                        objects.Add(new object[2] { entity.transform.position, $"{shortname} <color=#FFFF00>{currDistance}</color>" });
-                    }
+                    continue;
                 }
-                if (!test && ++checks % 200 == 0)
+                var currDistance = Mathf.CeilToInt(Vector3.Distance(ei.entity.transform.position, player.transform.position));
+                if (currDistance <= maxDistance)
                 {
-                    yield return CoroutineEx.waitForSeconds(0.0025f);
+                    var shortname = ei.entity is DroppedItem drop ? drop?.item?.info?.shortname ?? ei.name : ei.name;
+                    objects.Add(new object[2] { ei.entity.transform.position, $"<size={entityTextSize}>{shortname} <color=#FFFF00>{currDistance}</color></size>" });
                 }
             }
             AdminCommand(player, () =>
@@ -3792,13 +3927,13 @@ namespace Oxide.Plugins
                 }
             });
             Message(player, "ProcessRequestFinished", objects.Count);
-            objects.ResetToPool();
         }
 
         private void LoadData()
         {
             try { data = Interface.Oxide.DataFileSystem.ReadObject<StoredData>(Name); } catch (Exception ex) { Puts(ex.ToString()); }
             data ??= new();
+            data.Init();
         }
 
         private void RemoveNonAuthorizedOffsetData()
@@ -4180,6 +4315,11 @@ namespace Oxide.Plugins
                 ["ARICE"] = "AK47",
                 ["M92P"] = "M92",
                 ["M39P"] = "M39",
+                ["STH"] = "STH",
+                ["SUB"] = "SUB",
+                ["TB"] = "TB",
+                ["RB"] = "RB",
+                ["MLRS"] = "MLRS",
             }, this, "en");
 
             lang.RegisterMessages(new()
@@ -4258,6 +4398,11 @@ namespace Oxide.Plugins
                 ["ARICE"] = "AK47",
                 ["M92P"] = "M92",
                 ["M39P"] = "M39",
+                ["STH"] = "STH",
+                ["SUB"] = "SUB",
+                ["TB"] = "TB",
+                ["RB"] = "RB",
+                ["MLRS"] = "MLRS",
             }, this, "es");
         }
 
@@ -4466,7 +4611,7 @@ namespace Oxide.Plugins
         public class ConfigurationDrawDistances
         {
             [JsonProperty(PropertyName = "Sleepers Min Y")]
-            public float MinY = -50f;
+            public float MinY = -150f;
 
             [JsonProperty(PropertyName = "Player Corpses")]
             public float Corpse = 200;
@@ -4535,7 +4680,7 @@ namespace Oxide.Plugins
             public float VendingMachine = 250;
 
             [JsonProperty(PropertyName = "Radar Drops Command")]
-            public float Drops = 150;
+            public float Drops = 500;
 
             public float Get(EntityType type, BaseEntity entity)
             {
@@ -4551,6 +4696,7 @@ namespace Oxide.Plugins
                     case EntityType.Car: return Cars;
                     case EntityType.CCTV: return CCTV;
                     case EntityType.Col: return Col;
+                    case EntityType.Drop: return Drops;
                     case EntityType.Loot: return Loot;
                     case EntityType.Mini: return MC;
                     case EntityType.MLRS: return MLRS;
@@ -4572,6 +4718,7 @@ namespace Oxide.Plugins
                             if (entity is VendingMachine) return VendingMachine;
                             if (type == EntityType.Box) return Box;
                             if (entity is BaseNpc) return Animal;
+                            if (entity is BaseNPC2) return Animal;
                             if (type == EntityType.Npc) return NPC;
                             return 9999f;
                         }
@@ -5101,17 +5248,18 @@ namespace Oxide.Plugins
         protected override void LoadConfig()
         {
             base.LoadConfig();
+            canSaveConfig = false;
 
             try
             {
                 config = Config.ReadObject<Configuration>();
                 if (config == null) LoadDefaultConfig();
                 if (config.Settings.DropExceptions == null) config.Settings.DropExceptions = ItemExceptions;
+                canSaveConfig = true;
                 SaveConfig();
             }
             catch (Exception ex)
             {
-                canSaveConfig = false;
                 Puts(ex.ToString());
                 LoadDefaultConfig();
             }
@@ -5191,16 +5339,22 @@ namespace Oxide.Plugins.AdminRadarExtensionMethods
 {
     public static class ExtensionMethods
     {
+        public class DisposableList<T> : List<T>, IDisposable, Pool.IPooled
+        {
+            public void EnterPool() => this.Clear();
+            public void LeavePool() => this.Clear();
+            public void Dispose() { DisposableList<T> obj = this; obj.Clear(); Pool.Free(ref obj); }
+            public static DisposableList<T> Get() => Pool.Get<DisposableList<T>>();
+        }
         public static T ElementAt<T>(this IEnumerable<T> a, int b) { using (var c = a.GetEnumerator()) { while (c.MoveNext()) { if (b == 0) { return c.Current; } b--; } } return default(T); }
         public static List<T> ToList<T>(this IEnumerable<T> a, Func<T, bool> b = null) { var c = new List<T>(); using (var d = a.GetEnumerator()) { while (d.MoveNext()) { if (b == null || b(d.Current)) { c.Add(d.Current); } } } return c; }
         public static string[] ToLower(this IEnumerable<string> a, Func<string, bool> b = null) { var c = new List<string>(); using (var d = a.GetEnumerator()) { while (d.MoveNext()) { if (b == null || b(d.Current)) { c.Add(d.Current.ToLower()); } } } return c.ToArray(); }
         public static T[] Take<T>(this IList<T> a, int b) { var c = new List<T>(); for (int i = 0; i < a.Count; i++) { if (c.Count == b) { break; } c.Add(a[i]); } return c.ToArray(); }
         public static IEnumerable<V> Select<T, V>(this IEnumerable<T> a, Func<T, V> b) { var c = new List<V>(); using (var d = a.GetEnumerator()) { while (d.MoveNext()) { c.Add(b(d.Current)); } } return c; }
         public static T[] Where<T>(this IEnumerable<T> a, Func<T, bool> b) { var c = new List<T>(); using (var d = a.GetEnumerator()) { while (d.MoveNext()) { if (b(d.Current)) { c.Add(d.Current); } } } return c.ToArray(); }
-        public static IEnumerable<T> OfType<T>(this IEnumerable<object> a) { foreach (object b in a) { if (b is T) { yield return (T)b; } } }
         public static float Sum<T>(this IEnumerable<T> a, Func<T, float> b) { float c = 0; if (a == null) return c; foreach (T d in a) { if (d == null) continue; c = checked(c + b(d)); } return c; }
         public static int Sum<T>(this IEnumerable<T> a, Func<T, int> b) { int c = 0; if (a == null) return c; foreach (T d in a) { if (d == null) continue; c = checked(c + b(d)); } return c; }
-        public static bool IsKilled(this BaseNetworkable a) { try { return (object)a == null || a.net == null || a.IsDestroyed || a.transform == null;  } catch { return true; } }
+        public static bool IsKilled(this BaseNetworkable a) => a == null || a.net == null || a.IsDestroyed || !a.isSpawned;
         public static void ResetToPool<K, V>(this Dictionary<K, V> obj) { if (obj == null) return; obj.Clear(); Pool.FreeUnmanaged(ref obj); }
         public static void ResetToPool<T>(this List<T> obj) { if (obj == null) return; obj.Clear(); Pool.FreeUnmanaged(ref obj); }
     }

@@ -20,7 +20,7 @@ using static Oxide.Plugins.AdminRadarExtensionMethods.ExtensionMethods;
 
 namespace Oxide.Plugins
 {
-    [Info("Admin Radar", "nivex", "5.3.8")]
+    [Info("Admin Radar", "nivex", "5.3.9")]
     [Description("Radar tool for Admins and Developers.")]
     internal class AdminRadar : RustPlugin
     {
@@ -533,7 +533,7 @@ namespace Oxide.Plugins
                 }
                 public void SetEnabled(Network.Visibility.Group group, Vector3 to, float max)
                 {
-                    disabled = ei.group != group && (ei.from - to).sqrMagnitude > Mathf.Max(max * max, ei.sqrdist);
+                    disabled = ei == null || ei.group != group && (ei.from - to).sqrMagnitude > Mathf.Max(max * max, ei.sqrdist);
                 }
                 public bool IsOfType(EntityType type)
                 {
@@ -1667,7 +1667,10 @@ namespace Oxide.Plugins
                 if (config.Settings.ShowIdleTime)
                 {
                     var time = GetIdleTime(target);
-                    sb.Append($"<color={config.Hex.IdleTime}>{time}</color>");
+                    if (time > 0)
+                    {
+                        sb.Append($"<color={config.Hex.IdleTime}>{time}</color>");
+                    }
                 }
                 string health = showHT && target.metabolism != null ? Format(target, config.Settings.ApplySameColor) : $"{Mathf.CeilToInt(target.health)}";
                 if (config.Settings.ApplySameColor && !string.IsNullOrEmpty(clan ?? team))

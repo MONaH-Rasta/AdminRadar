@@ -20,7 +20,7 @@ using static Oxide.Plugins.AdminRadarExtensionMethods.ExtensionMethods;
 
 namespace Oxide.Plugins
 {
-    [Info("Admin Radar", "nivex", "5.3.7")]
+    [Info("Admin Radar", "nivex", "5.3.8")]
     [Description("Radar tool for Admins and Developers.")]
     internal class AdminRadar : RustPlugin
     {
@@ -38,7 +38,6 @@ namespace Oxide.Plugins
         private Dictionary<ulong, string> _clans = new();
         private Dictionary<ulong, string> _teamColors = new();
         private Dictionary<string, string> _clanColors = new();
-        private Dictionary<ulong, Timer> _voices = new();
         private Array _allEntityTypes = Enum.GetValues(typeof(EntityType));
         private CoroutineTimer _coroutineTimer = new(1.0f);
         private Stack<Coroutine> _coroutines = new();
@@ -520,8 +519,9 @@ namespace Oxide.Plugins
         {
             private static Func<char, bool> abbr = c => char.IsUpper(c) || char.IsDigit(c);
 
-            public class DataObject : Pool.IPooled
+            public class DataObject : Pool.IPooled, IEquatable<DataObject>
             {
+                public NetworkableId id;
                 public EntityInfo ei;
                 public Action action;
                 public DrawFlags flags;
@@ -545,6 +545,7 @@ namespace Oxide.Plugins
                 }
                 public void Reset()
                 {
+                    id = default;
                     ei = null;
                     action = null;
                     disabled = false;
@@ -557,6 +558,24 @@ namespace Oxide.Plugins
                 public void LeavePool()
                 {
                     Reset();
+                }
+                public bool Equals(DataObject other)
+                {
+                    if (other == null)
+                        return false;
+                    return id == other.id;
+                }
+                public override bool Equals(object obj)
+                {
+                    if (obj is DataObject other)
+                    {
+                        return id == other.id;
+                    }
+                    return false;
+                }
+                public override int GetHashCode()
+                {
+                    return id.GetHashCode();
                 }
             }
 
@@ -600,9 +619,11 @@ namespace Oxide.Plugins
             internal List<EntityType> entityTypes = Pool.Get<List<EntityType>>();
             internal List<DistantPlayer> distant = Pool.Get<List<DistantPlayer>>();
             internal List<EntityType> removeByEntityType = Pool.Get<List<EntityType>>();
-            internal Dictionary<NetworkableId, DataObject> data = Pool.Get<Dictionary<NetworkableId, DataObject>>();
+            internal HashSet<DataObject> data = Pool.Get<HashSet<DataObject>>();
             internal Dictionary<EntityType, Action> filters = Pool.Get<Dictionary<EntityType, Action>>();
             internal Dictionary<ulong, ItemContainer> backpacks = Pool.Get<Dictionary<ulong, ItemContainer>>();
+            internal Dictionary<ulong, float> Voices = Pool.Get<Dictionary<ulong, float>>();
+            internal List<ulong> VoiceExpirations = Pool.Get<List<ulong>>();
 
             internal Cache Cache => instance.cache;
             internal Configuration config => instance.config;
@@ -659,7 +680,6 @@ namespace Oxide.Plugins
                     var obj = distant[i];
                     if (obj != null)
                     {
-                        obj.Reset();
                         Pool.Free(ref obj);
                     }
                     distant[i] = null;
@@ -667,20 +687,19 @@ namespace Oxide.Plugins
                 for (int i = data.Count - 1; i >= 0; i--)
                 {
                     var obj = data.ElementAt(i);
-                    if (obj.Value != null)
+                    if (obj != null)
                     {
-                        var value = obj.Value;
-                        value.Reset();
-                        Pool.Free(ref value);
+                        Pool.Free(ref obj);
                     }
-                    data[obj.Key] = null;
                 }
                 data.ResetToPool();
+                Voices.ResetToPool();
                 exclude.ResetToPool();
                 distant.ResetToPool();
                 filters.ResetToPool();
                 backpacks.ResetToPool();
                 entityTypes.ResetToPool();
+                VoiceExpirations.ResetToPool();
                 removeByNetworkId.ResetToPool();
                 removeByEntityType.ResetToPool();
             }
@@ -758,6 +777,50 @@ namespace Oxide.Plugins
                 {
                     isEnabled = false;
                     Destroy(this);
+                }
+            }
+
+            private class Idle
+            {
+                public BasePlayer player;
+                public Vector3 lastPosition;
+                public float lastMovementTime;
+            }
+
+            private Dictionary<ulong, Idle> _idle = new();
+
+            private double GetIdleTime(BasePlayer target)
+            {
+                Vector3 currPosition = target.transform.position;
+                if (!_idle.TryGetValue(target.userID, out var idle))
+                {
+                    _idle[target.userID] = idle = new();
+                    idle.lastPosition = currPosition;
+                    idle.lastMovementTime = Time.time;
+                    idle.player = target;
+                    return 0;
+                }
+                if (idle.lastPosition != currPosition)
+                {
+                    idle.lastPosition = currPosition;
+                    idle.lastMovementTime = Time.time;
+                }
+                double time = Math.Round((Time.time - idle.lastMovementTime) / 60.0, config.Settings.IdleRoundDigits);
+                return time > 0 ? time : 0;
+            }
+
+            private void RemoveIdleTime()
+            {
+                if (_idle.Count > 0)
+                {
+                    foreach (var pair in _idle)
+                    {
+                        if (pair.Value.player == null || !pair.Value.player.IsConnected)
+                        {
+                            _idle.Remove(pair.Key);
+                            break;
+                        }
+                    }
                 }
             }
 
@@ -929,19 +992,19 @@ namespace Oxide.Plugins
 
             public void SetEnabledDataObjects()
             {
-                foreach (var pair in data)
+                foreach (var obj in data)
                 {
-                    pair.Value.SetEnabled(group, position, maxDistance);
+                    obj.SetEnabled(group, position, maxDistance);
                 }
             }
 
             public void RemoveByEntityType(EntityType type)
             {
-                foreach (var (id, obj) in data)
+                foreach (var obj in data)
                 {
                     if (obj.IsOfType(type))
                     {
-                        removeByNetworkId.Add(id);
+                        removeByNetworkId.Add(obj.id);
                         obj.disabled = true;
                     }
                 }
@@ -949,15 +1012,16 @@ namespace Oxide.Plugins
 
             public void RemoveByNetworkId(NetworkableId nid)
             {
-                if (data.TryGetValue(nid, out var obj))
+                foreach (var obj in data)
                 {
-                    if (obj != null)
+                    if (obj == null || obj.id != nid)
                     {
-                        obj.Reset();
-                        Pool.Free(ref obj);
+                        continue;
                     }
-                    data[nid] = null;
-                    data.Remove(nid);
+                    data.Remove(obj);
+                    var obj2 = obj;
+                    Pool.Free(ref obj2);
+                    break;
                 }
             }
 
@@ -1003,9 +1067,9 @@ namespace Oxide.Plugins
             {
                 float delay = this.delay;
 
-                foreach (var pair in data)
+                foreach (var obj in data)
                 {
-                    cobj = pair.Value;
+                    cobj = obj;
                     if (cobj == null || cobj.ei == null || cobj.disabled)
                     {
                         continue;
@@ -1023,7 +1087,7 @@ namespace Oxide.Plugins
                     cflag = DrawFlags.Text;
                     if (cobj.HasFlag(DrawFlags.Text))
                     {
-                        try { cobj.action(); } catch (Exception ex) { HandleException(pair.Key, ex); continue; }
+                        try { cobj.action(); } catch (Exception ex) { HandleException(obj.id, ex); continue; }
                         if (cobj.ei.info == null) { continue; }
                         player.SendConsoleCommand("ddraw.text", delay, cobj.ei.color, cobj.ei.from, cobj.ei.info);
                     }
@@ -1040,7 +1104,7 @@ namespace Oxide.Plugins
 
             private void DrawVoiceArrow(BasePlayer target, Vector3 a, float dist)
             {
-                if (config.Voice.Enabled && dist <= config.Voice.Distance && instance._voices.ContainsKey(target.userID))
+                if (Voices.Count > 0 && dist <= config.Voice.Distance && Voices.ContainsKey(target.userID))
                 {
                     DrawArrow(Color.yellow, a + fiveUp, a + twoHalfUp, 0.5f, true);
                 }
@@ -1260,16 +1324,48 @@ namespace Oxide.Plugins
 
             private DataObject SetDataObject(EntityInfo ei)
             {
-                if (!data.TryGetValue(ei.entity.net.ID, out var obj))
+                foreach (var other in data)
                 {
-                    obj = Pool.Get<DataObject>();
+                    if (other.id == ei.entity.net.ID)
+                    {
+                        other.ei = ei;
+                        return other;
+                    }
                 }
-                data[ei.entity.net.ID] = obj;
+
+                var obj = Pool.Get<DataObject>();
+                obj.id = ei.entity.net.ID;
                 obj.ei = ei;
+
+                data.Add(obj);
                 return obj;
             }
 
-            private bool HasDataObject(BaseEntity entity) => data.ContainsKey(entity.net.ID);
+            private bool HasDataObject(BaseEntity entity)
+            {
+                foreach (var obj in data)
+                {
+                    if (obj.id == entity.net.ID)
+                    {
+                        return true;
+                    }
+                }
+                return false;
+            }
+
+            private bool GetDataObject(NetworkableId id, out DataObject obj)
+            {
+                foreach (var other in data)
+                {
+                    if (other.id == id)
+                    {
+                        obj = other;
+                        return true;
+                    }
+                }
+                obj = null;
+                return false;
+            }
 
             private bool IsValid(EntityInfo ei, float dist)
             {
@@ -1290,6 +1386,13 @@ namespace Oxide.Plugins
                 {
                     currType = EntityType.Active;
 
+                    if (Voices.Count > 0)
+                    {
+                        CheckVoiceExpirations();
+                    }
+
+                    RemoveIdleTime();
+
                     foreach (var target in BasePlayer.activePlayerList)
                     {
                         TryCacheOnlinePlayer(target);
@@ -1303,6 +1406,24 @@ namespace Oxide.Plugins
                 }
             }
 
+            private void CheckVoiceExpirations()
+            {
+                foreach (var pair in Voices)
+                {
+                    if (Time.time > pair.Value)
+                    {
+                        VoiceExpirations.Add(pair.Key);
+                    }
+                }
+
+                foreach (var key in VoiceExpirations)
+                {
+                    Voices.Remove(key);
+                }
+
+                VoiceExpirations.Clear();
+            }
+
             public void TryCacheOnlinePlayer(BasePlayer target)
             {
                 currType = EntityType.Active;
@@ -1314,12 +1435,14 @@ namespace Oxide.Plugins
 
                 var nid = target.net.ID;
 
-                if (!data.TryGetValue(nid, out var obj))
+                if (!GetDataObject(nid, out var obj))
                 {
-                    data[nid] = obj = Pool.Get<DataObject>();
+                    obj = Pool.Get<DataObject>();
+                    data.Add(obj);
                 }
 
                 obj.Reset();
+                obj.id = nid;
                 obj.ei = new(target, EntityType.Active, config.Distance.Get);
 
                 CacheText(obj, Color.green, Vector3.zero, () =>
@@ -1371,6 +1494,31 @@ namespace Oxide.Plugins
                 {
                     currType = EntityType.Sleeper;
 
+                    bool doRemove = false;
+
+                    foreach (var obj in data)
+                    {
+                        if (obj.ei.type != currType)
+                        {
+                            continue;
+                        }
+                        if (!obj.ei.entity.IsValid())
+                        {
+                            removeByNetworkId.Add(obj.id);
+                            obj.disabled = true;
+                            doRemove = true;
+                        }
+                    }
+
+                    if (doRemove)
+                    {
+                        foreach (var nid in removeByNetworkId)
+                        {
+                            RemoveByNetworkId(nid);
+                        }
+                        removeByNetworkId.Clear();
+                    }
+
                     foreach (var target in BasePlayer.sleepingPlayerList)
                     {
                         TryCacheSleepingPlayer(target);
@@ -1393,12 +1541,14 @@ namespace Oxide.Plugins
 
                 var nid = target.net.ID;
 
-                if (!data.TryGetValue(nid, out var obj))
+                if (!GetDataObject(nid, out var obj))
                 {
-                    data[nid] = obj = Pool.Get<DataObject>();
+                    obj = Pool.Get<DataObject>();
+                    data.Add(obj);
                 }
 
                 obj.Reset();
+                obj.id = nid;
                 obj.ei = new(target, EntityType.Sleeper, config.Distance.Get);
 
                 CacheText(obj, Color.cyan, Vector3.zero, () =>
@@ -1513,6 +1663,11 @@ namespace Oxide.Plugins
                 if (instance._teamColors.TryGetValue(target.currentTeam, out var team) && !config.Settings.ApplySameColor)
                 {
                     team = $"<color={team}>T</color>";
+                }
+                if (config.Settings.ShowIdleTime)
+                {
+                    var time = GetIdleTime(target);
+                    sb.Append($"<color={config.Hex.IdleTime}>{time}</color>");
                 }
                 string health = showHT && target.metabolism != null ? Format(target, config.Settings.ApplySameColor) : $"{Mathf.CeilToInt(target.health)}";
                 if (config.Settings.ApplySameColor && !string.IsNullOrEmpty(clan ?? team))
@@ -3450,7 +3605,7 @@ namespace Oxide.Plugins
                 config.Methods.Text = true;
             }
 
-            if (config.Voice.Enabled)
+            if (config.Voice.Enabled && config.Voice.Distance > 0f)
             {
                 Subscribe(nameof(OnPlayerVoice));
             }
@@ -3510,20 +3665,15 @@ namespace Oxide.Plugins
 
         private void OnPlayerVoice(BasePlayer player, byte[] data)
         {
-            if (!_voices.TryGetValue(player.userID, out var voice))
+            if (player == null)
             {
-                float max = config.Settings.DefaultInvokeTime;
-
-                foreach (var radar in _radars)
-                {
-                    max = Mathf.Max(radar.invokeTime, max);
-                }
-
-                ulong userid = player.userID;
-
-                _voices[userid] = timer.Once(config.Voice.Interval + max, () => _voices.Remove(userid));
+                return;
             }
-            else voice.Reset();
+
+            foreach (var radar in _radars)
+            {
+                radar.Voices[player.userID] = Time.time + config.Voice.Interval + Mathf.Max(radar.invokeTime, config.Settings.DefaultInvokeTime);
+            }
         }
 
         private void OnPlayerTrackStarted(BasePlayer player, ulong targetId)
@@ -4180,7 +4330,7 @@ namespace Oxide.Plugins
             }
 
             var text = state ? config.Discord.On : config.Discord.Off;
-            var grid = PhoneController.PositionToGridCoord(position);
+            var grid = MapHelper.PositionToString(position);
             var message = $"[{DateTime.Now}] {playerName} ({playerId} @ {grid}): {text}";
             var chatEntry = new ConVar.Chat.ChatEntry { Message = message, UserId = playerId, Username = playerName, Time = Facepunch.Math.Epoch.Current };
             var steam = $"[{playerName}](https://steamcommunity.com/profiles/{playerId})";
@@ -4403,7 +4553,85 @@ namespace Oxide.Plugins
                 ["TB"] = "TB",
                 ["RB"] = "RB",
                 ["MLRS"] = "MLRS",
-            }, this, "es");
+            }, this, "es-ES");
+
+            lang.RegisterMessages(new()
+            {
+                ["NotAllowed"] = "Você não tem permissão para usar este comando.",
+                ["PreviousFilter"] = "Para usar seu filtro anterior, digite <color=#FFA500>/{0} f</color>",
+                ["Activated"] = "ESP Ativado - Atualização de {0}s - Distância de {1}m. Use <color=#FFA500>/{2} help</color> para ajuda.",
+                ["Deactivated"] = "ESP Desativado.",
+                ["Exception"] = "Ferramenta ESP: Ocorreu um erro. Verifique o console do servidor.",
+                ["GUIShown"] = "A GUI será mostrada",
+                ["GUIHidden"] = "A GUI agora será ocultada",
+                ["InvalidID"] = "{0} não é um ID Steam válido. Entrada removida.",
+                ["BoxesAll"] = "Mostrando todas as caixas.",
+                ["BoxesOnlineOnly"] = "Mostrando apenas caixas de jogadores online.",
+                ["Help1"] = "<color=#FFA500>Filtros Disponíveis</color>: {0}",
+                ["Help2"] = "<color=#FFA500>/{0} {1}</color> - Alterne para mostrar apenas caixas de jogadores online ao usar o filtro <color=#FF0000>box</color>.",
+                ["Help3"] = "<color=#FFA500>/{0} {1}</color> - Alterne a interface de alternância rápida on/off",
+                ["Help5"] = "Exemplo: <color=#FFA500>/{0} 1 1000 box loot stash</color>",
+                ["Help6"] = "Exemplo: <color=#FFA500>/{0} 0.5 400 all</color>",
+                ["VisionOn"] = "Agora você verá para onde os jogadores estão olhando.",
+                ["VisionOff"] = "Você não verá mais para onde os jogadores estão olhando.",
+                ["ExtendedPlayersOn"] = "Informações detalhadas dos jogadores ativadas.",
+                ["ExtendedPlayersOff"] = "Informações detalhadas dos jogadores desativadas.",
+                ["Help7"] = "<color=#FFA500>/{0} {1}</color> - Alterne para mostrar para onde os jogadores estão olhando.",
+                ["Help8"] = "<color=#FFA500>/{0} {1}</color> - Alterne para informações detalhadas dos jogadores.",
+                ["backpack"] = "mochila",
+                ["scientist"] = "cientista",
+                ["Help9"] = "<color=#FFA500>/{0} drops</color> - Mostra todos os itens caídos dentro de {1}m.",
+                ["NoActiveRadars"] = "Ninguém está usando o radar no momento.",
+                ["ActiveRadars"] = "Usuários ativos do radar: {0}",
+                ["All"] = "Todos",
+                ["Bags"] = "Bolsas",
+                ["Box"] = "Caixa",
+                ["Collectibles"] = "Colecionáveis",
+                ["Dead"] = "Mortos",
+                ["Loot"] = "Loots",
+                ["Ore"] = "Minério",
+                ["Sleepers"] = "Dormindo",
+                ["Stash"] = "Stash",
+                ["TC"] = "TC",
+                ["Turrets"] = "Turrets",
+                ["Bear"] = "Urso",
+                ["Boar"] = "Javali",
+                ["Chicken"] = "Galinha",
+                ["Wolf"] = "Lobo",
+                ["Stag"] = "Veado",
+                ["Horse"] = "Cavalo",
+                ["My Base"] = "Minha Base",
+                ["scarecrow"] = "espantalho",
+                ["murderer"] = "assassino",
+                ["WaitCooldown"] = "Você deve esperar {0} segundos para usar este comando novamente.",
+                ["missionprovider_stables_a"] = "missões",
+                ["missionprovider_stables_b"] = "missões",
+                ["missionprovider_outpost_a"] = "missões",
+                ["missionprovider_outpost_b"] = "missões",
+                ["missionprovider_fishing_a"] = "missões",
+                ["missionprovider_fishing_b"] = "missões",
+                ["missionprovider_bandit_a"] = "missões",
+                ["missionprovider_bandit_b"] = "missões",
+                ["simpleshark"] = "tubarão",
+                ["stables_shopkeeper"] = "vendedor",
+                ["npc_underwaterdweller"] = "habitante subaquático",
+                ["boat_shopkeeper"] = "vendedor de barco",
+                ["bandit_shopkeeper"] = "vendedor",
+                ["outpost_shopkeeper"] = "vendedor",
+                ["npc_bandit_guard"] = "guarda",
+                ["bandit_conversationalist"] = "comerciante",
+                ["npc_tunneldweller"] = "habitante do túnel",
+                ["ProcessRequest"] = "Processando solicitação; isso levará alguns segundos...",
+                ["ProcessRequestFinished"] = "{0} entidades foram encontradas.",
+                ["Radar UI Help"] = "Você pode alternar o botão de movimento/resetar a UI usando: {0}",
+                ["AT"] = "AT",
+                ["bag"] = "bolsa",
+                ["LR300AR"] = "LR300",
+                ["AR"] = "AK47",
+                ["ARICE"] = "AK47",
+                ["M92P"] = "M92",
+                ["M39P"] = "M39"
+            }, this, "pt-BR");
         }
 
         public class ConfigurationSettings
@@ -4457,6 +4685,12 @@ namespace Oxide.Plugins
             [JsonProperty(PropertyName = "Show Average Ping Every X Seconds [0 = disabled]")]
             public float AveragePingInterval;
 
+            [JsonProperty(PropertyName = "Show Player Idle Time (Minutes)")]
+            public bool ShowIdleTime;
+
+            [JsonProperty(PropertyName = "Player Idle Time Round To X Digits")]
+            public int IdleRoundDigits;
+            
             [JsonProperty(PropertyName = "Re-use Cooldown, Seconds")]
             public float Cooldown;
 
@@ -4883,6 +5117,9 @@ namespace Oxide.Plugins
 
             [JsonProperty(PropertyName = "Health")]
             public string Health = "#ff0000";
+
+            [JsonProperty(PropertyName = "Idle Time")]
+            public string IdleTime = "#00ffff";
 
             [JsonProperty(PropertyName = "Backpacks")]
             public string Backpack = "#c0c0c0";
@@ -5356,6 +5593,7 @@ namespace Oxide.Plugins.AdminRadarExtensionMethods
         public static int Sum<T>(this IEnumerable<T> a, Func<T, int> b) { int c = 0; if (a == null) return c; foreach (T d in a) { if (d == null) continue; c = checked(c + b(d)); } return c; }
         public static bool IsKilled(this BaseNetworkable a) => a == null || a.net == null || a.IsDestroyed || !a.isSpawned;
         public static void ResetToPool<K, V>(this Dictionary<K, V> obj) { if (obj == null) return; obj.Clear(); Pool.FreeUnmanaged(ref obj); }
+        public static void ResetToPool<T>(this HashSet<T> obj) { if (obj == null) return; obj.Clear(); Pool.FreeUnmanaged(ref obj); }
         public static void ResetToPool<T>(this List<T> obj) { if (obj == null) return; obj.Clear(); Pool.FreeUnmanaged(ref obj); }
     }
 }

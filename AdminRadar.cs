@@ -20,7 +20,7 @@ using static Oxide.Plugins.AdminRadarExtensionMethods.ExtensionMethods;
 
 namespace Oxide.Plugins
 {
-    [Info("Admin Radar", "nivex", "5.3.9")]
+    [Info("Admin Radar", "nivex", "5.4.0")]
     [Description("Radar tool for Admins and Developers.")]
     internal class AdminRadar : RustPlugin
     {
@@ -519,9 +519,8 @@ namespace Oxide.Plugins
         {
             private static Func<char, bool> abbr = c => char.IsUpper(c) || char.IsDigit(c);
 
-            public class DataObject : Pool.IPooled, IEquatable<DataObject>
+            public class DataObject : Pool.IPooled
             {
-                public NetworkableId id;
                 public EntityInfo ei;
                 public Action action;
                 public DrawFlags flags;
@@ -545,7 +544,6 @@ namespace Oxide.Plugins
                 }
                 public void Reset()
                 {
-                    id = default;
                     ei = null;
                     action = null;
                     disabled = false;
@@ -558,24 +556,6 @@ namespace Oxide.Plugins
                 public void LeavePool()
                 {
                     Reset();
-                }
-                public bool Equals(DataObject other)
-                {
-                    if (other == null)
-                        return false;
-                    return id == other.id;
-                }
-                public override bool Equals(object obj)
-                {
-                    if (obj is DataObject other)
-                    {
-                        return id == other.id;
-                    }
-                    return false;
-                }
-                public override int GetHashCode()
-                {
-                    return id.GetHashCode();
                 }
             }
 
@@ -619,7 +599,7 @@ namespace Oxide.Plugins
             internal List<EntityType> entityTypes = Pool.Get<List<EntityType>>();
             internal List<DistantPlayer> distant = Pool.Get<List<DistantPlayer>>();
             internal List<EntityType> removeByEntityType = Pool.Get<List<EntityType>>();
-            internal HashSet<DataObject> data = Pool.Get<HashSet<DataObject>>();
+            internal Dictionary<NetworkableId, DataObject> data = Pool.Get<Dictionary<NetworkableId, DataObject>>();
             internal Dictionary<EntityType, Action> filters = Pool.Get<Dictionary<EntityType, Action>>();
             internal Dictionary<ulong, ItemContainer> backpacks = Pool.Get<Dictionary<ulong, ItemContainer>>();
             internal Dictionary<ulong, float> Voices = Pool.Get<Dictionary<ulong, float>>();
@@ -687,9 +667,11 @@ namespace Oxide.Plugins
                 for (int i = data.Count - 1; i >= 0; i--)
                 {
                     var obj = data.ElementAt(i);
-                    if (obj != null)
+                    if (obj.Value != null)
                     {
-                        Pool.Free(ref obj);
+                        var value = obj.Value;
+                        value.Reset();
+                        Pool.Free(ref value);
                     }
                 }
                 data.ResetToPool();
@@ -951,6 +933,17 @@ namespace Oxide.Plugins
 
             private void DoRemoves()
             {
+                if (data.Count != 0)
+                {
+                    foreach (var pair in data)
+                    {
+                        if (pair.Value.ei == null || !pair.Value.ei.entity.IsValid())
+                        {
+                            removeByNetworkId.Add(pair.Key);
+                            pair.Value.disabled = true;
+                        }
+                    }
+                }
                 if (removeByEntityType.Count != 0)
                 {
                     foreach (var type in removeByEntityType)
@@ -992,36 +985,32 @@ namespace Oxide.Plugins
 
             public void SetEnabledDataObjects()
             {
-                foreach (var obj in data)
+                foreach (var pair in data)
                 {
-                    obj.SetEnabled(group, position, maxDistance);
+                    pair.Value.SetEnabled(group, position, maxDistance);
                 }
             }
 
             public void RemoveByEntityType(EntityType type)
             {
-                foreach (var obj in data)
+                foreach (var pair in data)
                 {
-                    if (obj.IsOfType(type))
+                    if (pair.Value.IsOfType(type))
                     {
-                        removeByNetworkId.Add(obj.id);
-                        obj.disabled = true;
+                        removeByNetworkId.Add(pair.Key);
+                        pair.Value.disabled = true;
                     }
                 }
             }
 
             public void RemoveByNetworkId(NetworkableId nid)
             {
-                foreach (var obj in data)
+                if (data.Remove(nid, out var obj))
                 {
-                    if (obj == null || obj.id != nid)
+                    if (obj != null)
                     {
-                        continue;
+                        Pool.Free(ref obj);
                     }
-                    data.Remove(obj);
-                    var obj2 = obj;
-                    Pool.Free(ref obj2);
-                    break;
                 }
             }
 
@@ -1067,9 +1056,9 @@ namespace Oxide.Plugins
             {
                 float delay = this.delay;
 
-                foreach (var obj in data)
+                foreach (var pair in data)
                 {
-                    cobj = obj;
+                    cobj = pair.Value;
                     if (cobj == null || cobj.ei == null || cobj.disabled)
                     {
                         continue;
@@ -1087,7 +1076,7 @@ namespace Oxide.Plugins
                     cflag = DrawFlags.Text;
                     if (cobj.HasFlag(DrawFlags.Text))
                     {
-                        try { cobj.action(); } catch (Exception ex) { HandleException(obj.id, ex); continue; }
+                        try { cobj.action(); } catch (Exception ex) { HandleException(pair.Key, ex); continue; }
                         if (cobj.ei.info == null) { continue; }
                         player.SendConsoleCommand("ddraw.text", delay, cobj.ei.color, cobj.ei.from, cobj.ei.info);
                     }
@@ -1324,48 +1313,18 @@ namespace Oxide.Plugins
 
             private DataObject SetDataObject(EntityInfo ei)
             {
-                foreach (var other in data)
+                if (!data.TryGetValue(ei.entity.net.ID, out var obj))
                 {
-                    if (other.id == ei.entity.net.ID)
-                    {
-                        other.ei = ei;
-                        return other;
-                    }
+                    obj = Pool.Get<DataObject>();
                 }
 
-                var obj = Pool.Get<DataObject>();
-                obj.id = ei.entity.net.ID;
+                data[ei.entity.net.ID] = obj;
                 obj.ei = ei;
 
-                data.Add(obj);
                 return obj;
             }
 
-            private bool HasDataObject(BaseEntity entity)
-            {
-                foreach (var obj in data)
-                {
-                    if (obj.id == entity.net.ID)
-                    {
-                        return true;
-                    }
-                }
-                return false;
-            }
-
-            private bool GetDataObject(NetworkableId id, out DataObject obj)
-            {
-                foreach (var other in data)
-                {
-                    if (other.id == id)
-                    {
-                        obj = other;
-                        return true;
-                    }
-                }
-                obj = null;
-                return false;
-            }
+            private bool HasDataObject(BaseEntity entity) => data.ContainsKey(entity.net.ID);
 
             private bool IsValid(EntityInfo ei, float dist)
             {
@@ -1435,14 +1394,12 @@ namespace Oxide.Plugins
 
                 var nid = target.net.ID;
 
-                if (!GetDataObject(nid, out var obj))
+                if (!data.TryGetValue(nid, out var obj))
                 {
-                    obj = Pool.Get<DataObject>();
-                    data.Add(obj);
+                    data[nid] = obj = Pool.Get<DataObject>();
                 }
 
                 obj.Reset();
-                obj.id = nid;
                 obj.ei = new(target, EntityType.Active, config.Distance.Get);
 
                 CacheText(obj, Color.green, Vector3.zero, () =>
@@ -1494,31 +1451,6 @@ namespace Oxide.Plugins
                 {
                     currType = EntityType.Sleeper;
 
-                    bool doRemove = false;
-
-                    foreach (var obj in data)
-                    {
-                        if (obj.ei.type != currType)
-                        {
-                            continue;
-                        }
-                        if (!obj.ei.entity.IsValid())
-                        {
-                            removeByNetworkId.Add(obj.id);
-                            obj.disabled = true;
-                            doRemove = true;
-                        }
-                    }
-
-                    if (doRemove)
-                    {
-                        foreach (var nid in removeByNetworkId)
-                        {
-                            RemoveByNetworkId(nid);
-                        }
-                        removeByNetworkId.Clear();
-                    }
-
                     foreach (var target in BasePlayer.sleepingPlayerList)
                     {
                         TryCacheSleepingPlayer(target);
@@ -1541,14 +1473,12 @@ namespace Oxide.Plugins
 
                 var nid = target.net.ID;
 
-                if (!GetDataObject(nid, out var obj))
+                if (!data.TryGetValue(nid, out var obj))
                 {
-                    obj = Pool.Get<DataObject>();
-                    data.Add(obj);
+                    data[nid] = obj = Pool.Get<DataObject>();
                 }
 
                 obj.Reset();
-                obj.id = nid;
                 obj.ei = new(target, EntityType.Sleeper, config.Distance.Get);
 
                 CacheText(obj, Color.cyan, Vector3.zero, () =>
@@ -1667,7 +1597,7 @@ namespace Oxide.Plugins
                 if (config.Settings.ShowIdleTime)
                 {
                     var time = GetIdleTime(target);
-                    if (time > 0)
+                    if (time >= config.Settings.IdleVisibleMinutes)
                     {
                         sb.Append($"<color={config.Hex.IdleTime}>{time}</color>");
                     }
@@ -4690,6 +4620,9 @@ namespace Oxide.Plugins
 
             [JsonProperty(PropertyName = "Show Player Idle Time (Minutes)")]
             public bool ShowIdleTime;
+
+            [JsonProperty(PropertyName = "Player Idle Time Visible After X Minutes")]
+            public int IdleVisibleMinutes = 1;
 
             [JsonProperty(PropertyName = "Player Idle Time Round To X Digits")]
             public int IdleRoundDigits;

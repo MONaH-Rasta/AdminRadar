@@ -18,13 +18,18 @@ using System.Text.RegularExpressions;
 using UnityEngine;
 using static Oxide.Plugins.AdminRadarExtensionMethods.ExtensionMethods;
 
+/*
+todo: add drones
+
+*/
+
 namespace Oxide.Plugins
 {
-    [Info("Admin Radar", "nivex", "5.4.0")]
+    [Info("Admin Radar", "nivex", "5.4.1")]
     [Description("Radar tool for Admins and Developers.")]
     internal class AdminRadar : RustPlugin
     {
-        [PluginReference] Plugin Clans, Backpacks, DiscordMessages;
+        [PluginReference] Plugin Clans, Backpacks;
 
         [Flags] public enum DrawFlags { None = 0, Arrow = 1 << 1, Box = 1 << 2, Text = 1 << 3, }
         public enum EntityType { Active, Airdrop, Bag, Backpack, Boat, Bradley, Car, CargoPlane, CargoShip, CCTV, CH47, Box, Col, TC, TCArrow, Dead, Drop, Limit, Loot, Heli, Mini, MLRS, Npc, Ore, Horse, RHIB, Sleeper, Stash, Trap, Turret }
@@ -32,14 +37,15 @@ namespace Oxide.Plugins
         private List<EntityType> _errorTypes = new();
         private List<Radar> _radars = new();
         private List<BaseEntity> _spawnedEntities = new();
+        private List<ClanInfo> _clans = new();
         private Dictionary<NetworkableId, Vector3> _despawnedEntities = new();
         private Dictionary<NetworkableId, BaseEntity> _allEntities = new();
         private Dictionary<string, float> _cooldowns = new();
-        private Dictionary<ulong, string> _clans = new();
         private Dictionary<ulong, string> _teamColors = new();
         private Dictionary<string, string> _clanColors = new();
         private Array _allEntityTypes = Enum.GetValues(typeof(EntityType));
         private CoroutineTimer _coroutineTimer = new(1.0f);
+        private Coroutine _clanCo;
         private Stack<Coroutine> _coroutines = new();
         private StoredData data = new();
         private bool _isPopulatingCache;
@@ -87,31 +93,31 @@ namespace Oxide.Plugins
             public Configuration config;
             public AdminRadar instance;
             internal EntityType entityType;
-            public Dictionary<NetworkableId, EntityInfo> Airdrops { get; private set; } = new();
-            public Dictionary<NetworkableId, EntityInfo> Animals { get; private set; } = new();
-            public Dictionary<NetworkableId, EntityInfo> Backpacks { get; private set; } = new();
-            public Dictionary<NetworkableId, EntityInfo> Bags { get; private set; } = new();
-            public Dictionary<NetworkableId, EntityInfo> Boats { get; private set; } = new();
-            public Dictionary<NetworkableId, EntityInfo> BradleyAPCs { get; private set; } = new();
-            public Dictionary<NetworkableId, EntityInfo> CargoPlanes { get; private set; } = new();
-            public Dictionary<NetworkableId, EntityInfo> CargoShips { get; private set; } = new();
-            public Dictionary<NetworkableId, EntityInfo> Cars { get; private set; } = new();
-            public Dictionary<NetworkableId, EntityInfo> CCTV { get; private set; } = new();
-            public Dictionary<NetworkableId, EntityInfo> CH47 { get; private set; } = new();
-            public Dictionary<NetworkableId, EntityInfo> Cupboards { get; private set; } = new();
-            public Dictionary<NetworkableId, EntityInfo> Collectibles { get; private set; } = new();
-            public Dictionary<NetworkableId, EntityInfo> Containers { get; private set; } = new();
-            public Dictionary<NetworkableId, EntityInfo> Corpses { get; private set; } = new();
-            public Dictionary<NetworkableId, EntityInfo> Drops { get; private set; } = new();
-            public Dictionary<NetworkableId, EntityInfo> Helicopters { get; private set; } = new();
-            public Dictionary<NetworkableId, EntityInfo> MiniCopter { get; private set; } = new();
-            public Dictionary<NetworkableId, EntityInfo> MLRS { get; private set; } = new();
-            public Dictionary<NetworkableId, EntityInfo> NPCPlayers { get; set; } = new();
-            public Dictionary<NetworkableId, EntityInfo> Ores { get; private set; } = new();
-            public Dictionary<NetworkableId, EntityInfo> RHIB { get; private set; } = new();
-            public Dictionary<NetworkableId, EntityInfo> RidableHorse { get; private set; } = new();
-            public Dictionary<NetworkableId, EntityInfo> Turrets { get; private set; } = new();
-            public Dictionary<NetworkableId, EntityInfo> Traps { get; private set; } = new();
+            public Dictionary<NetworkableId, EntityInfo> Airdrops = new();
+            public Dictionary<NetworkableId, EntityInfo> Animals = new();
+            public Dictionary<NetworkableId, EntityInfo> Backpacks = new();
+            public Dictionary<NetworkableId, EntityInfo> Bags = new();
+            public Dictionary<NetworkableId, EntityInfo> Boats = new();
+            public Dictionary<NetworkableId, EntityInfo> BradleyAPCs = new();
+            public Dictionary<NetworkableId, EntityInfo> CargoPlanes = new();
+            public Dictionary<NetworkableId, EntityInfo> CargoShips = new();
+            public Dictionary<NetworkableId, EntityInfo> Cars = new();
+            public Dictionary<NetworkableId, EntityInfo> CCTV = new();
+            public Dictionary<NetworkableId, EntityInfo> CH47 = new();
+            public Dictionary<NetworkableId, EntityInfo> Cupboards = new();
+            public Dictionary<NetworkableId, EntityInfo> Collectibles = new();
+            public Dictionary<NetworkableId, EntityInfo> Containers = new();
+            public Dictionary<NetworkableId, EntityInfo> Corpses = new();
+            public Dictionary<NetworkableId, EntityInfo> Drops = new();
+            public Dictionary<NetworkableId, EntityInfo> Helicopters = new();
+            public Dictionary<NetworkableId, EntityInfo> MiniCopter = new();
+            public Dictionary<NetworkableId, EntityInfo> MLRS = new();
+            public Dictionary<NetworkableId, EntityInfo> NPC = new();
+            public Dictionary<NetworkableId, EntityInfo> Ores = new();
+            public Dictionary<NetworkableId, EntityInfo> RHIB = new();
+            public Dictionary<NetworkableId, EntityInfo> RidableHorse = new();
+            public Dictionary<NetworkableId, EntityInfo> Turrets = new();
+            public Dictionary<NetworkableId, EntityInfo> Traps = new();
 
             public bool Add(BaseEntity entity)
             {
@@ -133,11 +139,17 @@ namespace Oxide.Plugins
                         }
                         if (player.userID.IsSteamId())
                         {
-                            instance._radars.ForEach(radar => radar.TryCacheOnlinePlayer(player));
+                            instance._radars.ForEach(radar =>
+                            {
+                                if (radar.GetBool(EntityType.Active))
+                                {
+                                    radar.TryCacheOnlinePlayer(player);
+                                }
+                            });
                         }
-                        else if (config.Core.NPCPlayer && !NPCPlayers.TryGetValue(entity.net.ID, out var ei))
+                        else if (config.Core.NPC && !NPC.TryGetValue(entity.net.ID, out var ei))
                         {
-                            NPCPlayers[entity.net.ID] = ei = new(player, EntityType.Npc, config.Distance.Get);
+                            NPC[entity.net.ID] = ei = new(player, EntityType.Npc, config.Distance.Get);
                             instance.TryCacheByType(EntityType.Npc, ei);
                         }
                     });
@@ -164,11 +176,19 @@ namespace Oxide.Plugins
                 {
                     return true;
                 }
+                if (config.Core.NPC && Add_Internal<TravellingVendor, EntityInfo>(NPC, entity, EntityType.Npc))
+                {
+                    return true;
+                }
                 if (config.Core.Animals && Add_Internal<BaseNpc, EntityInfo>(Animals, entity, EntityType.Npc))
                 {
                     return true;
                 }
                 if (config.Core.Animals && Add_Internal<BaseNPC2, EntityInfo>(Animals, entity, EntityType.Npc))
+                {
+                    return true;
+                }
+                if (config.Core.Animals && Add_Internal<WildlifeHazard, EntityInfo>(Animals, entity, EntityType.Npc))
                 {
                     return true;
                 }
@@ -228,7 +248,7 @@ namespace Oxide.Plugins
                 {
                     return true;
                 }
-                if ((config.Additional.Bradley || config.GUI.Bradley) && (Add_Internal<BradleyAPC, EntityInfo>(BradleyAPCs, entity, EntityType.Bradley))) // || Add_Internal<TravellingVendor, EntityInfo>(BradleyAPCs, entity, EntityType.Bradley)))
+                if ((config.Additional.Bradley || config.GUI.Bradley) && (Add_Internal<BradleyAPC, EntityInfo>(BradleyAPCs, entity, EntityType.Bradley)))
                 {
                     return true;
                 }
@@ -293,7 +313,7 @@ namespace Oxide.Plugins
                 if (Remove_Internal(Helicopters, nid)) return true;
                 if (Remove_Internal(MiniCopter, nid)) return true;
                 if (Remove_Internal(MLRS, nid)) return true;
-                if (Remove_Internal(NPCPlayers, nid)) return true;
+                if (Remove_Internal(NPC, nid)) return true;
                 if (Remove_Internal(Ores, nid)) return true;
                 if (Remove_Internal(RHIB, nid)) return true;
                 if (Remove_Internal(RidableHorse, nid)) return true;
@@ -318,11 +338,11 @@ namespace Oxide.Plugins
                 return cachedList.Remove(key);
             }
 
-#if DEBUG
             public void Print()
             {
                 StringBuilder sb = StringBuilderCache.Acquire();
 
+                sb.AppendLine();
                 sb.AppendLine($"{nameof(Airdrops)}: {Airdrops.Count}");
                 sb.AppendLine($"{nameof(Animals)}: {Animals.Count}");
                 sb.AppendLine($"{nameof(Backpacks)}: {Backpacks.Count}");
@@ -341,16 +361,16 @@ namespace Oxide.Plugins
                 sb.AppendLine($"{nameof(Helicopters)}: {Helicopters.Count}");
                 sb.AppendLine($"{nameof(MiniCopter)}: {MiniCopter.Count}");
                 sb.AppendLine($"{nameof(MLRS)}: {MLRS.Count}");
-                sb.AppendLine($"{nameof(NPCPlayers)}: {NPCPlayers.Count}");
+                sb.AppendLine($"{nameof(NPC)}: {NPC.Count}");
                 sb.AppendLine($"{nameof(Ores)}: {Ores.Count}");
                 sb.AppendLine($"{nameof(RHIB)}: {RHIB.Count}");
                 sb.AppendLine($"{nameof(RidableHorse)}: {RidableHorse.Count}");
                 sb.AppendLine($"{nameof(Traps)}: {Traps.Count}");
                 sb.AppendLine($"{nameof(Turrets)}: {Turrets.Count}");
 
-                instance.Puts(StringBuilderCache.GetStringAndRelease(sb));
+                Puts(StringBuilderCache.GetStringAndRelease(sb));
             }
-#endif
+
             public bool IsDrop(BaseEntity entity)
             {
                 if (entity is DroppedItem || entity is Landmine || entity is BearTrap || entity is DroppedItemContainer || entity is RFTimedExplosive)
@@ -400,12 +420,18 @@ namespace Oxide.Plugins
             private Stopwatch stopwatch = new();
             private float _maxDurationMs;
             private bool _isRunning;
-            //public bool ForceStop { get; set; }
+            //public bool ForceStop;
             public double Elapsed => stopwatch.Elapsed.TotalMilliseconds;
 
             public CoroutineTimer(float maxDurationMs)
             {
                 _maxDurationMs = maxDurationMs;
+            }
+
+            public void Stop()
+            {
+                stopwatch.Stop();
+                _isRunning = false;
             }
 
             public void Start()
@@ -442,35 +468,17 @@ namespace Oxide.Plugins
 
         internal static class StringBuilderCache
         {
-            [ThreadStatic]
-            private static StringBuilder builder;
-
             public static StringBuilder Acquire(string text = "")
             {
-                StringBuilder cached = builder;
-                if (cached != null)
-                {
-                    builder = null;
-                    cached.Clear();
-                    cached.Append(text);
-                    return cached;
-                }
-                return new(text);
-            }
-
-            public static void Clear()
-            {
-                if (builder != null)
-                {
-                    builder.Clear();
-                    builder = null;
-                }
+                StringBuilder builder = Pool.Get<StringBuilder>();
+                if (string.IsNullOrEmpty(text)) return builder;
+                return builder.Append(text);
             }
 
             public static string GetStringAndRelease(StringBuilder sb)
             {
                 string result = sb.ToString();
-                builder = sb;
+                Pool.FreeUnmanaged(ref sb);
                 return result;
             }
         }
@@ -479,6 +487,7 @@ namespace Oxide.Plugins
         {
             public BuildingPrivlidge priv;
             public BaseEntity entity;
+            public BasePlayer owner;
             public EntityType type;
             public Color color;
             public Vector3 _from;
@@ -487,11 +496,31 @@ namespace Oxide.Plugins
             public string name;
             public object info;
             public float dist;
+            public float nextonlinecheck;
             public float sqrdist;
             public float size = 0.5f;
             public Transform t;
             public Network.Visibility.Group group => entity?.net?.group;
             public Vector3 from => (t == null ? _from : _from = t.position) + offset;
+            public bool Moving => type == EntityType.Airdrop || type == EntityType.Bradley || type == EntityType.CargoPlane || type == EntityType.Heli;
+            public bool OutOfRange(Vector3 position)
+            {
+                if (entity == null || (from - position).sqrMagnitude > sqrdist)
+                {
+                    info = null;
+                    return true;
+                }
+                return false;
+            }
+            public BasePlayer ToPlayer()
+            {
+                if (owner == null && Time.time > nextonlinecheck)
+                {
+                    nextonlinecheck = Time.time + 30f;
+                    owner = BasePlayer.FindAwakeOrSleeping(entity.OwnerID.ToString());
+                }
+                return owner;
+            }
             public EntityInfo() { }
             public EntityInfo(BaseEntity entity, EntityType type, Func<EntityType, BaseEntity, float> getDistance, Func<string, string> stripTags = null)
             {
@@ -532,7 +561,14 @@ namespace Oxide.Plugins
                 }
                 public void SetEnabled(Network.Visibility.Group group, Vector3 to, float max)
                 {
-                    disabled = ei == null || ei.group != group && (ei.from - to).sqrMagnitude > Mathf.Max(max * max, ei.sqrdist);
+                    if (ei == null)
+                    {
+                        disabled = true;
+                    }
+                    else if (!ei.Moving)
+                    {
+                        disabled = ei.group != group && (ei.from - to).sqrMagnitude > Mathf.Max(max * max, ei.sqrdist);
+                    }
                 }
                 public bool IsOfType(EntityType type)
                 {
@@ -581,8 +617,8 @@ namespace Oxide.Plugins
                 }
             }
 
-            internal bool setSource = true, canGetExistingBackpacks = true, isEnabled = true, canBypassOverride, hasPermAllowed, isAdmin, showHT, showAll;
-            internal int inactiveSeconds, activatedSeconds, checks;
+            internal bool setSource = true, canGetExistingBackpacks = true, isEnabled = true, canBypassOverride, hasPermAllowed, isAdmin, showHT, showAll, Extended;
+            internal int entityNameSize, entityTextSize, playerNameSize, playerTextSize, inactiveSeconds, activatedSeconds, checks;
             internal float currDistance, invokeTime, maxDistance;
             internal string username, userid;
             internal RaycastHit hit;
@@ -602,9 +638,7 @@ namespace Oxide.Plugins
             internal Dictionary<NetworkableId, DataObject> data = Pool.Get<Dictionary<NetworkableId, DataObject>>();
             internal Dictionary<EntityType, Action> filters = Pool.Get<Dictionary<EntityType, Action>>();
             internal Dictionary<ulong, ItemContainer> backpacks = Pool.Get<Dictionary<ulong, ItemContainer>>();
-            internal Dictionary<ulong, float> Voices = Pool.Get<Dictionary<ulong, float>>();
-            internal List<ulong> VoiceExpirations = Pool.Get<List<ulong>>();
-
+            
             internal Cache Cache => instance.cache;
             internal Configuration config => instance.config;
             internal float delay => invokeTime + 0.05f;
@@ -648,6 +682,7 @@ namespace Oxide.Plugins
                 {
                     instance.Unsubscribe(nameof(OnPlayerRespawned));
                 }
+                instance._voices.Remove(userid);
                 instance.DestroyUI(player);
                 ResetToPool();
                 StopAll();
@@ -675,13 +710,11 @@ namespace Oxide.Plugins
                     }
                 }
                 data.ResetToPool();
-                Voices.ResetToPool();
                 exclude.ResetToPool();
                 distant.ResetToPool();
                 filters.ResetToPool();
                 backpacks.ResetToPool();
                 entityTypes.ResetToPool();
-                VoiceExpirations.ResetToPool();
                 removeByNetworkId.ResetToPool();
                 removeByEntityType.ResetToPool();
             }
@@ -705,8 +738,9 @@ namespace Oxide.Plugins
                 this.instance = instance;
                 this.limitUp = new(0f, config.Limit.Height);
                 this.instance._radars.Add(this);
-                canBypassOverride = HasPermission(userid, "adminradar.bypass.override");
+                canBypassOverride = CanBypassOverride(userid);
                 hasPermAllowed = HasPermission(userid, "adminradar.allowed");
+                Extended = instance.data.Extended.Contains(userid);
                 InvokeRepeating(Activity, 0f, 1f);
                 Interface.CallHook("OnRadarActivated", player, username, userid, position);
                 if (instance._radars.Count == 1)
@@ -786,6 +820,7 @@ namespace Oxide.Plugins
                 {
                     idle.lastPosition = currPosition;
                     idle.lastMovementTime = Time.time;
+                    return 0;
                 }
                 double time = Math.Round((Time.time - idle.lastMovementTime) / 60.0, config.Settings.IdleRoundDigits);
                 return time > 0 ? time : 0;
@@ -863,7 +898,7 @@ namespace Oxide.Plugins
                 SetupFilter(EntityType.Turret, ShowTurrets);
                 SetupFilter(EntityType.Bradley, ShowBradley);
                 SetupFilter(EntityType.Col, ShowCollectibles);
-                SetupFilter(EntityType.Airdrop, ShowSupplyDrops);
+                SetupFilter(EntityType.Airdrop, ShowAirdrops);
                 SetupFilter(EntityType.Car, () => ShowEntity(EntityType.Car, Cache.Cars));
                 SetupFilter(EntityType.CH47, () => ShowEntity(EntityType.CH47, Cache.CH47));
                 SetupFilter(EntityType.MLRS, () => ShowEntity(EntityType.MLRS, Cache.MLRS));
@@ -1018,7 +1053,7 @@ namespace Oxide.Plugins
             {
                 try
                 {
-                    if (!entityTypes.Contains(type) || !ei.entity.IsValid() || ei.entity.net.group != group && Distance(ei._from) > ei.dist)
+                    if (!entityTypes.Contains(type) || !ei.entity.IsValid())
                     {
                         return;
                     }
@@ -1088,14 +1123,6 @@ namespace Oxide.Plugins
                 if (dist <= 150f && instance.data.Visions.Contains(userid) && Physics.Raycast(target.eyes.HeadRay(), out hit, Mathf.Infinity))
                 {
                     DrawArrow(Color.red, target.eyes.position + new Vector3(0f, 0.115f, 0f), hit.point, 0.15f, true);
-                }
-            }
-
-            private void DrawVoiceArrow(BasePlayer target, Vector3 a, float dist)
-            {
-                if (Voices.Count > 0 && dist <= config.Voice.Distance && Voices.ContainsKey(target.userID))
-                {
-                    DrawArrow(Color.yellow, a + fiveUp, a + twoHalfUp, 0.5f, true);
                 }
             }
 
@@ -1180,7 +1207,7 @@ namespace Oxide.Plugins
                 removeByEntityType.Add(currType);
                 instance._errorTypes.Add(currType);
                 instance.Message(player, "Exception");
-                instance.Puts("Error @{0} ({1}): {2}", currType, cflag, ex);
+                Puts("Error @{0} ({1}): {2}", currType, cflag, ex);
                 RemoveByEntityType(currType);
             }
 
@@ -1214,8 +1241,6 @@ namespace Oxide.Plugins
                 return backpacks != null && backpacks.TryGetValue(userid, out _backpackItemContainer) && _backpackItemContainer != null && !_backpackItemContainer.IsEmpty();
             }
 
-            public int entityNameSize, entityTextSize, playerNameSize, playerTextSize;
-
             private string Format(object prefix, object text, bool entity = true)
             {
                 if (entity)
@@ -1239,6 +1264,10 @@ namespace Oxide.Plugins
             }
 
             private bool HasPermission(string userid, string perm) => instance.permission.UserHasPermission(userid, perm);
+
+            private bool CanBypass(string userid) => config.Bypass.Count > 0 && config.Bypass.Contains(userid);
+            
+            private bool CanBypassOverride(string userid) => config.BypassOverride.Count > 0 && config.BypassOverride.Contains(userid);
 
             private string GetContents(List<Item> itemList, int num)
             {
@@ -1324,19 +1353,19 @@ namespace Oxide.Plugins
                 return obj;
             }
 
-            private bool HasDataObject(BaseEntity entity) => data.ContainsKey(entity.net.ID);
+            private bool HasDataObject(BaseEntity entity) => data.TryGetValue(entity.net.ID, out var obj) && obj != null && obj.ei != null;
 
-            private bool IsValid(EntityInfo ei, float dist)
+            private bool IsValid(EntityInfo ei, float dist = 9999f)
             {
-                if (ei.t == null || !ei.entity.IsValid() || HasDataObject(ei.entity))
+                if (ei == null || ei.t == null || !ei.entity.IsValid() || HasDataObject(ei.entity))
                 {
                     return false;
                 }
-                if (ei.type == EntityType.Bradley || ei.type == EntityType.Heli)
+                if (ei.Moving)
                 {
                     return SetDistance(ei._from) <= dist || currDistance <= maxDistance;
                 }
-                return SetDistance(ei._from) <= dist && currDistance <= maxDistance;
+                return SetDistance(ei.from) <= dist && currDistance <= maxDistance;
             }
 
             private void ShowActive()
@@ -1345,12 +1374,12 @@ namespace Oxide.Plugins
                 {
                     currType = EntityType.Active;
 
-                    if (Voices.Count > 0)
-                    {
-                        CheckVoiceExpirations();
-                    }
-
                     RemoveIdleTime();
+
+                    if (!GetBool(EntityType.Active))
+                    {
+                        return;
+                    }
 
                     foreach (var target in BasePlayer.activePlayerList)
                     {
@@ -1365,29 +1394,11 @@ namespace Oxide.Plugins
                 }
             }
 
-            private void CheckVoiceExpirations()
-            {
-                foreach (var pair in Voices)
-                {
-                    if (Time.time > pair.Value)
-                    {
-                        VoiceExpirations.Add(pair.Key);
-                    }
-                }
-
-                foreach (var key in VoiceExpirations)
-                {
-                    Voices.Remove(key);
-                }
-
-                VoiceExpirations.Clear();
-            }
-
             public void TryCacheOnlinePlayer(BasePlayer target)
             {
                 currType = EntityType.Active;
 
-                if (target.IsKilled() || !GetBool(EntityType.Active) || exclude.Contains(target.userID) || !canBypassOverride && HasPermission(target.UserIDString, "adminradar.bypass"))
+                if (target.IsKilled() || exclude.Contains(target.userID) || !canBypassOverride && CanBypass(target.UserIDString))
                 {
                     return;
                 }
@@ -1411,7 +1422,10 @@ namespace Oxide.Plugins
 
                     if (!target.IsConnected)
                     {
-                        TryCacheSleepingPlayer(target);
+                        if (GetBool(EntityType.Sleeper))
+                        {
+                            TryCacheSleepingPlayer(target);
+                        }
                         return;
                     }
 
@@ -1428,7 +1442,6 @@ namespace Oxide.Plugins
                         DrawBox(color, obj.ei._from + Vector3.up, target.GetHeight());
                         DrawCupboardArrows(target, EntityType.Active);
                         DrawAppendedText(target, obj.ei._from, twoUp, color);
-                        DrawVoiceArrow(target, obj.ei._from, dist);
                         DrawVisionArrow(target, dist);
                     }
                     else if (config.Limit.Enabled && config.Limit.Range > 0f && dist < maxDistance)
@@ -1451,6 +1464,11 @@ namespace Oxide.Plugins
                 {
                     currType = EntityType.Sleeper;
 
+                    if (!GetBool(EntityType.Sleeper))
+                    {
+                        return;
+                    }
+
                     foreach (var target in BasePlayer.sleepingPlayerList)
                     {
                         TryCacheSleepingPlayer(target);
@@ -1466,7 +1484,7 @@ namespace Oxide.Plugins
 
             private void TryCacheSleepingPlayer(BasePlayer target)
             {
-                if (target.IsKilled() || !GetBool(EntityType.Sleeper) || target.transform.position.y < config.Distance.MinY || !canBypassOverride && HasPermission(target.UserIDString, "adminradar.bypass"))
+                if (target.IsKilled() || target.transform.position.y < config.Distance.MinY || !canBypassOverride && CanBypass(target.UserIDString))
                 {
                     return;
                 }
@@ -1490,7 +1508,10 @@ namespace Oxide.Plugins
 
                     if (target.IsConnected)
                     {
-                        TryCacheOnlinePlayer(target);
+                        if (GetBool(EntityType.Active))
+                        {
+                            TryCacheOnlinePlayer(target);
+                        }
                         return;
                     }
 
@@ -1545,21 +1566,22 @@ namespace Oxide.Plugins
                     offset += Vector3.up;
                 }
                 var sb = StringBuilderCache.Acquire();
-                if (instance.data.Extended.Contains(userid))
+                if (Extended)
                 {
                     Item item = target.GetActiveItem();
 
                     if (item != null)
                     {
-                        sb.Append(instance.m(config.Options.Abbr ? string.Concat(item.info.displayName.english.Where(abbr)) : item.info.displayName.english, userid));
+                        BuildItemString(sb, item);
 
                         if (item.contents?.itemList?.Count > 0)
                         {
                             sb.Append(" (");
-                            item.contents.itemList.ForEach(con =>
+                            foreach (var con in item.contents.itemList)
                             {
-                                sb.Append(instance.m(config.Options.Abbr ? string.Concat(con.info.displayName.english.Where(abbr)) : con.info.displayName.english, userid)).Append('|');
-                            });
+                                BuildItemString(sb, con);
+                                sb.Append('|');
+                            }
                             sb.Length -= 1;
                             sb.Append(')');
                         }
@@ -1605,11 +1627,31 @@ namespace Oxide.Plugins
                 string health = showHT && target.metabolism != null ? Format(target, config.Settings.ApplySameColor) : $"{Mathf.CeilToInt(target.health)}";
                 if (config.Settings.ApplySameColor && !string.IsNullOrEmpty(clan ?? team))
                 {
-                    DrawPlayerText(color, a + offset, $"{GetCheats(target)}<color={clan ?? team}>{R(target.displayName)}</color>", $"<color={clan ?? team}>{health} {Distance(a)} {StringBuilderCache.GetStringAndRelease(sb)}</color>");
+                    DrawPlayerText(color, a + offset, $"{GetCheats(target)}<color={clan ?? team}>{instance.R(target.displayName)}</color>", $"<color={clan ?? team}>{health} {Distance(a)} {StringBuilderCache.GetStringAndRelease(sb)}</color>");
                 }
                 else
                 {
-                    DrawPlayerText(color, a + offset, $"{GetCheats(target)}{R(target.displayName)}", $"<color={config.Hex.Health}>{health}</color> <color={config.Hex.Dist}>{Distance(a)}</color> {StringBuilderCache.GetStringAndRelease(sb)}{clan}{team}");
+                    DrawPlayerText(color, a + offset, $"{GetCheats(target)}{instance.R(target.displayName)}", $"<color={config.Hex.Health}>{health}</color> <color={config.Hex.Dist}>{Distance(a)}</color> {StringBuilderCache.GetStringAndRelease(sb)}{clan}{team}");
+                }
+            }
+
+            private void BuildItemString(StringBuilder sb, Item item)
+            {
+                if (config.Options.Abbr)
+                {
+                    var sb2 = StringBuilderCache.Acquire();
+                    foreach (char c in item.info.displayName.english)
+                    {
+                        if (abbr(c))
+                        {
+                            sb2.Append(c);
+                        }
+                    }
+                    sb.Append(instance.m(StringBuilderCache.GetStringAndRelease(sb2), userid));
+                }
+                else
+                {
+                    sb.Append(instance.m(item.info.displayName.english, userid));
                 }
             }
 
@@ -1796,7 +1838,7 @@ namespace Oxide.Plugins
                 {
                     currType = EntityType.Heli;
 
-                    if (IsValid(ei, 9999f))
+                    if (IsValid(ei))
                     {
                         var obj = SetDataObject(ei);
                         var color = __(config.Hex.Heli);
@@ -1805,6 +1847,7 @@ namespace Oxide.Plugins
 
                         CacheText(obj, color, twoUp, () =>
                         {
+                            if (ei.OutOfRange(position)) return;
                             string heliHealth = ei.entity.Health() > 1000 ? Mathf.CeilToInt(ei.entity.Health()).ToString("#,##0,K", CultureInfo.InvariantCulture) : Mathf.CeilToInt(ei.entity.Health()).ToString();
                             string info = config.Additional.RotorHealth ? $"<color={config.Hex.Health}>{heliHealth}</color> (<color=#FFFF00>{Mathf.CeilToInt(weakspots[0].health)}</color>/<color=#FFFF00>{Mathf.CeilToInt(weakspots[1].health)}</color>)" : $"<color={config.Hex.Health}>{heliHealth}</color>";
                             ei.info = Format(name, $"{info} <color={config.Hex.Dist}>{Distance(ei.from)}</color>");
@@ -1838,14 +1881,15 @@ namespace Oxide.Plugins
                 {
                     currType = EntityType.Bradley;
 
-                    if (IsValid(ei, 9999f))
+                    if (IsValid(ei))
                     {
                         var obj = SetDataObject(ei);
                         var color = __(config.Hex.Bradley);
-                        var name = instance.m(ei.entity is BradleyAPC ? "B" : "V", userid);
+                        var name = instance.m("B", userid);
 
                         CacheText(obj, color, twoUp, () =>
                         {
+                            if (ei.OutOfRange(position)) return;
                             string health = ei.entity.Health() > 1000 ? Mathf.CeilToInt(ei.entity.Health()).ToString("#,##0,K", CultureInfo.InvariantCulture) : Mathf.CeilToInt(ei.entity.Health()).ToString();
                             ei.info = Format(name, $"<color={config.Hex.Health}>{health}</color> <color={config.Hex.Dist}>{Distance(ei.from)}</color>");
                         });
@@ -1916,7 +1960,7 @@ namespace Oxide.Plugins
                 }
             }
 
-            private void ShowSupplyDrops()
+            private void ShowAirdrops()
             {
                 foreach (var drop in Cache.Airdrops.Values)
                 {
@@ -1929,15 +1973,16 @@ namespace Oxide.Plugins
                 try
                 {
                     currType = EntityType.Airdrop;
+                    var drop = ei.entity as SupplyDrop;
 
-                    if (IsValid(ei, config.Distance.Airdrop))
+                    if (IsValid(ei))
                     {
                         var obj = SetDataObject(ei);
-                        var drop = ei.entity as SupplyDrop;
                         var color = __(config.Hex.AD);
 
                         CacheText(obj, color, halfUp, () =>
                         {
+                            if (ei.OutOfRange(position)) return;
                             string text;
                             if (drop == null || drop.inventory == null || drop.inventory.itemList == null) text = "(N/A) ";
                             else text = config.Options.AirdropContentAmount > 0 ? GetContents(drop.inventory.itemList, config.Options.AirdropContentAmount) : $"({drop.inventory.itemList.Count}) ";
@@ -1946,7 +1991,6 @@ namespace Oxide.Plugins
 
                         CacheBox(obj, color, halfUp, GetScale(currDistance));
                     }
-
                     checks++;
                 }
                 catch (Exception ex)
@@ -1961,7 +2005,7 @@ namespace Oxide.Plugins
 
                 if (instance.data.OnlineBoxes.Contains(userid) && ei.entity.OwnerID.IsSteamId() && (ei.entity.PrefabName.Contains("box") || ei.entity.PrefabName.Contains("coffin")))
                 {
-                    var owner = BasePlayer.FindAwakeOrSleeping(ei.entity.OwnerID.ToString());
+                    var owner = ei.ToPlayer();
 
                     if (owner == null || !owner.IsConnected)
                     {
@@ -1978,16 +2022,16 @@ namespace Oxide.Plugins
                     return;
                 }
 
-                var itemList = container.inventory.itemList;
-                var color = __(ei.entity is LockedByEntCrate || ei.entity is VendingMachine ? config.Hex.Heli : type == EntityType.Box ? config.Hex.Box : type == EntityType.Loot ? config.Hex.Loot : config.Hex.Stash);
+                var color = __(ei.entity is LockedByEntCrate or VendingMachine ? config.Hex.Heli : type == EntityType.Box ? config.Hex.Box : type == EntityType.Loot ? config.Hex.Loot : config.Hex.Stash);
+                var inventory = container.inventory;
 
                 ei.name = instance.m(instance.StripTags(ei.entity.ShortPrefabName).Replace("coffinstorage", "coffin").Replace("vendingmachine", "VM"), userid);
 
                 CacheText(obj, color, halfUp, () =>
                 {
                     ei.info = null;
-                    if (itemList == null || !config.Options.DrawEmptyContainers && itemList.Count == 0) return;
-                    string text = amount > 0 ? GetContents(itemList, amount) : $"({itemList.Count}) ";
+                    if (inventory == null || inventory.itemList == null || !config.Options.DrawEmptyContainers && inventory.itemList.Count == 0) return;
+                    string text = amount > 0 ? GetContents(inventory.itemList, amount) : $"({inventory.itemList.Count}) ";
                     ei.info = Format(ei.name, $"{text}<color={config.Hex.Dist}>{Distance(ei._from)}</color>");
                 });
 
@@ -2246,7 +2290,7 @@ namespace Oxide.Plugins
                         var shortname = entity is DroppedItem drop ? drop?.item?.info.shortname ?? entity.ShortPrefabName : entity.ShortPrefabName;
                         var obj = SetDataObject(ei);
                         var color = Color.red;
-
+                        
                         CacheText(obj, color, halfUp, () =>
                         {
                             ei.info = Format(ei.name, $"{shortname} <color=#FFFF00>{currDistance}</color>");
@@ -2263,9 +2307,9 @@ namespace Oxide.Plugins
 
             private void ShowNPC()
             {
-                if (config.Core.NPCPlayer)
+                if (config.Core.NPC)
                 {
-                    foreach (var target in Cache.NPCPlayers.Values)
+                    foreach (var target in Cache.NPC.Values)
                     {
                         CacheNpc(target);
                     }
@@ -2280,13 +2324,46 @@ namespace Oxide.Plugins
                 }
             }
 
+            private void CacheVendor(EntityInfo ei)
+            {
+                try
+                {
+                    currType = EntityType.Npc;
+
+                    if (IsValid(ei))
+                    {
+                        var obj = SetDataObject(ei);
+                        var color = __(config.Hex.NPC);
+                        var name = instance.m(ei.entity.ShortPrefabName, userid);
+
+                        CacheText(obj, color, Vector3.up, () =>
+                        {
+                            ei.info = null;
+                            float dist = Distance(ei.from);
+                            if (dist < config.Distance.NPC && dist < maxDistance && IsAtView(ei))
+                            {
+                                ei.info = Format(name, $"<color={config.Hex.Dist}>{dist}</color>");
+                            }
+                        });
+
+                        CacheBox(obj, color, Vector3.up, ei.entity.bounds.size.y);
+                    }
+
+                    checks++;
+                }
+                catch (Exception ex)
+                {
+                    HandleException(ex);
+                }
+            }
+
             private void CacheAnimal(EntityInfo ei)
             {
                 try
                 {
                     currType = EntityType.Npc;
 
-                    if (IsValid(ei, 9999f))
+                    if (IsValid(ei))
                     {
                         var obj = SetDataObject(ei);
                         var color = __(config.Hex.Animal);
@@ -2323,13 +2400,19 @@ namespace Oxide.Plugins
                 {
                     currType = EntityType.Npc;
 
+                    if (ei.entity is TravellingVendor)
+                    {
+                        CacheVendor(ei);
+                        return;
+                    }
+
                     if (!(ei.entity is BasePlayer))
                     {
                         CacheAnimal(ei);
                         return;
                     }
 
-                    if (IsValid(ei, 9999f))
+                    if (IsValid(ei))
                     {
                         var obj = SetDataObject(ei);
 
@@ -2356,7 +2439,7 @@ namespace Oxide.Plugins
                                 ei.info = Format(displayName, $"<color={config.Hex.Health}>{Mathf.CeilToInt(target.health)}</color> <color={config.Hex.Dist}>{dist}</color>");
                             });
 
-                            CacheBox(obj, color, Vector3.up, target.GetHeight(target.modelState.ducked));
+                            CacheBox(obj, color, Vector3.up, BasePlayer.GetHeight(target.modelState.ducked));
                             CacheArrow(obj, color, new(0f, ei.from.y + 10), ei.from, 1, false);
                         }
                         else CacheBox(obj, Color.blue, Vector3.up, 5f, true);
@@ -2417,8 +2500,13 @@ namespace Oxide.Plugins
                     {
                         var obj = SetDataObject(ei);
                         var color = __(config.Hex.Resource);
-                        var containedItems = ei.entity.GetComponent<ResourceDispenser>().containedItems;
+                        var re = ei.entity as ResourceEntity;
 
+                        if (re == null)
+                            return;
+
+                        var containedItems = re.resourceDispenser.containedItems;
+                        
                         CacheText(obj, color, Vector3.up, () =>
                         {
                             ei.info = Format(ei.name, config.Options.ResourceAmounts ? $"({containedItems.Sum(i => i.amount)}) <color={config.Hex.Dist}>{Distance(ei.from)}</color>" : $"<color={config.Hex.Dist}>{Distance(ei.from)}</color>");
@@ -2458,7 +2546,7 @@ namespace Oxide.Plugins
                         CacheText(obj, Color.magenta, new(0f, 0.3f, 0f), () =>
                         {
                             ei.color = ei.entity.HasFlag(BaseEntity.Flags.Reserved5) ? Color.green : cctv.IsPowered() || cctv.IsStatic() ? Color.cyan : Color.red;
-                            ei.info = Format(name, $"<color={config.Hex.Dist}>{Distance(ei.from)}</color> {cctv.ViewerCount}");
+                            ei.info = Format(name, $"<color={config.Hex.Dist}>{Distance(ei.from)}</color> {cctv.ViewerCount} {cctv.rcIdentifier}");
                         });
 
                         CacheBox(obj, Color.magenta, Vector3.zero, 0.25f);
@@ -2572,14 +2660,15 @@ namespace Oxide.Plugins
                     {
                         if (!config.Additional.CH47 && !config.GUI.CH47) return;
                     }
-
+                    
                     entityName = instance.m(ei.entity is ScrapTransportHelicopter ? "STH" : ei.entity is BaseSubmarine ? "SUB" : ei.entity is Tugboat ? "TB" : ei.entity is BaseBoat ? "RB" : string.Concat(entityName.Where(char.IsUpper)), userid);
                     
                     var color = __(ei.entity is ScrapTransportHelicopter ? config.Hex.STH : config.Hex.Get(entityType));
                     var obj = SetDataObject(ei);
-
+                    
                     CacheText(obj, color, offset, () =>
                     {
+                        if (ei.Moving && ei.OutOfRange(position)) return;
                         string health = ei.entity.Health() > 1000 ? Mathf.CeilToInt(ei.entity.Health()).ToString("#,##0,K", CultureInfo.InvariantCulture) : Mathf.CeilToInt(ei.entity.Health()).ToString();
                         string info = $"{entityName} <color={config.Hex.Health}>{health}</color>";
                         ei.info = Format(info, $"<color={config.Hex.Dist}>{Distance(ei.from)}</color>");
@@ -2692,7 +2781,7 @@ namespace Oxide.Plugins
                 cached += cache.Cupboards.Count;
             }
 
-            if (config.Core.NPCPlayer)
+            if (config.Core.NPC)
             {
                 if (config.Additional.RH)
                 {
@@ -2702,6 +2791,7 @@ namespace Oxide.Plugins
 
                 yield return CreateCoroutine(AddElementsToCache<BaseNpc>(_coroutineTimer, cache.Animals, EntityType.Npc));
                 yield return CreateCoroutine(AddElementsToCache<BaseNPC2>(_coroutineTimer, cache.Animals, EntityType.Npc));
+                yield return CreateCoroutine(AddElementsToCache<WildlifeHazard>(_coroutineTimer, cache.Animals, EntityType.Npc));
                 yield return CreateCoroutine(AddElementsToCache<SimpleShark>(_coroutineTimer, cache.Animals, EntityType.Npc));
                 cached += cache.Animals.Count;
 
@@ -2709,8 +2799,9 @@ namespace Oxide.Plugins
                 {
                     return entity is BasePlayer player && !entity.IsKilled() && !player.userID.IsSteamId();
                 };
-                yield return CreateCoroutine(AddElementsToCache<BasePlayer>(_coroutineTimer, cache.NPCPlayers, EntityType.Npc, validNPC));
-                cached += cache.NPCPlayers.Count;
+                yield return CreateCoroutine(AddElementsToCache<TravellingVendor>(_coroutineTimer, cache.NPC, EntityType.Npc));
+                yield return CreateCoroutine(AddElementsToCache<BasePlayer>(_coroutineTimer, cache.NPC, EntityType.Npc, validNPC));
+                cached += cache.NPC.Count;
             }
 
             if (config.Additional.CCTV)
@@ -2791,7 +2882,6 @@ namespace Oxide.Plugins
 
             if (config.Additional.Bradley)
             {
-                //yield return CreateCoroutine(AddElementsToCache<TravellingVendor>(_coroutineTimer, cache.BradleyAPCs, EntityType.Bradley));
                 yield return CreateCoroutine(AddElementsToCache<BradleyAPC>(_coroutineTimer, cache.BradleyAPCs, EntityType.Bradley));
                 cached += cache.BradleyAPCs.Count;
             }
@@ -2890,6 +2980,7 @@ namespace Oxide.Plugins
             //Puts("FillCache");
             _coroutines.Pop();
             _coroutines.Push(ServerMgr.Instance.StartCoroutine(FillOnEntitySpawned()));
+            _coroutineTimer.Stop();
         }
 
         private Coroutine CreateCoroutine(IEnumerator operation)
@@ -3182,7 +3273,13 @@ namespace Oxide.Plugins
 
         private void RadarCommandY(BasePlayer player, string command, string[] args)
         {
-            args = args.ToLower(x => x.ToLower() != "true");
+            args = args.ToLower(x => !x.Equals("true", StringComparison.CurrentCultureIgnoreCase));
+
+            if (args.Contains("print"))
+            {
+                cache.Print();
+                return;
+            }
 
             if (!data.Filters.TryGetValue(player.UserIDString, out var filters))
             {
@@ -3278,6 +3375,8 @@ namespace Oxide.Plugins
                         {
                             if (!data.Extended.Remove(player.UserIDString)) data.Extended.Add(player.UserIDString);
 
+                            var r = _radars.Find(x => x.player == player);
+                            if (r != null) r.Extended = data.Extended.Contains(player.UserIDString);
                             Message(player, data.Extended.Contains(player.UserIDString) ? "ExtendedPlayersOn" : "ExtendedPlayersOff");
                         }
                         return;
@@ -3506,9 +3605,7 @@ namespace Oxide.Plugins
             Unsubscribe(nameof(OnRadarActivated));
             Unsubscribe(nameof(OnRadarDeactivated));
             permission.RegisterPermission("adminradar.allowed", this);
-            permission.RegisterPermission("adminradar.bypass", this);
             permission.RegisterPermission("adminradar.auto", this);
-            permission.RegisterPermission("adminradar.bypass.override", this);
             permission.RegisterPermission("adminradar.list", this);
             LoadData();
             RegisterCommands();
@@ -3516,6 +3613,11 @@ namespace Oxide.Plugins
 
         private void Unload()
         {
+            if (_clanCo != null)
+            {
+                ServerMgr.Instance.StopCoroutine(_clanCo);
+                _clans.Clear();
+            }
             isUnloading = true;
             StopFillCache();
             foreach (var radar in _radars.ToList())
@@ -3524,7 +3626,6 @@ namespace Oxide.Plugins
                 _radars.Remove(radar);
                 UnityEngine.Object.Destroy(radar);
             }
-            StringBuilderCache.Clear();
             SaveData();
         }
 
@@ -3580,7 +3681,13 @@ namespace Oxide.Plugins
         {
             if (config.Settings.Barebones)
             {
-                _radars.ForEach(radar => radar.TryCacheOnlinePlayer(player));
+                _radars.ForEach(radar =>
+                {
+                    if (radar.GetBool(EntityType.Active))
+                    {
+                        radar.TryCacheOnlinePlayer(player);
+                    }
+                });
             }
             else
             {
@@ -3598,16 +3705,70 @@ namespace Oxide.Plugins
 
         private void OnPlayerVoice(BasePlayer player, byte[] data)
         {
-            if (player == null)
+            if (player == null || player.IsDestroyed)
             {
                 return;
             }
 
+            Vector3 a = player.transform.position;
+            float currentTime = UnityEngine.Time.time;
+
+            if (currentTime >= _nextVoiceCleanupTime)
+            {
+                _nextVoiceCleanupTime = currentTime + 30f;
+                if (_voices.Count > 0)
+                {
+                    using var voiceKeys = Facepunch.Pool.Get<PooledList<string>>();
+                    voiceKeys.AddRange(_voices.Keys);
+                    foreach (var voiceKey in voiceKeys)
+                    {
+                        if (_voices.TryGetValue(voiceKey, out var speakers))
+                        {
+                            using var speakerKeys = Facepunch.Pool.Get<PooledList<string>>();
+                            speakerKeys.AddRange(speakers.Keys);
+                            foreach (var speakerKey in speakerKeys)
+                            {
+                                if (currentTime >= speakers[speakerKey])
+                                {
+                                    speakers.Remove(speakerKey);
+                                }
+                            }
+                            if (speakers.Count == 0)
+                            {
+                                _voices.Remove(voiceKey);
+                            }
+                        }
+                    }
+                }
+            }
+
             foreach (var radar in _radars)
             {
-                radar.Voices[player.userID] = Time.time + config.Voice.Interval + Mathf.Max(radar.invokeTime, config.Settings.DefaultInvokeTime);
+                if (radar.player == null || (a - radar.position).sqrMagnitude > config.Voice.SqrDistance)
+                {
+                    continue;
+                }
+
+                string radarId = radar.userid;
+                string speakerId = player.UserIDString;
+
+                if (!_voices.TryGetValue(radarId, out var speakers))
+                {
+                    _voices[radarId] = speakers = new();
+                }
+
+                if (speakers.TryGetValue(speakerId, out float expiry) && currentTime < expiry)
+                {
+                    continue;
+                }
+
+                speakers[speakerId] = currentTime + config.Voice.Interval;
+                radar.player.SendConsoleCommand("ddraw.arrow", config.Voice.Interval + 0.02f, Color.yellow, a + radar.fiveUp, a + radar.twoHalfUp, 0.5f);
             }
         }
+
+        private Dictionary<string, Dictionary<string, float>> _voices = new();
+        private float _nextVoiceCleanupTime;
 
         private void OnPlayerTrackStarted(BasePlayer player, ulong targetId)
         {
@@ -3698,23 +3859,58 @@ namespace Oxide.Plugins
                 id = team.teamID;
             }
 
-            if (!_teamColors.ContainsKey(id))
+            if (!_teamColors.TryGetValue(id, out string value))
             {
                 return null;
             }
 
-            return _teamColors[id];
+            return value;
         }
 
         private string GetClanOf(ulong playerId)
         {
-            if (!_clans.TryGetValue(playerId, out var clan))
+            if (Clans == null) return string.Empty;
+            int index = _clans.FindIndex(x => x.userid == playerId);
+            if (index != -1)
             {
-                _clans[playerId] = clan = Clans?.Call("GetClanOf", playerId) as string ?? string.Empty;
-                timer.Once(30f, () => _clans.Remove(playerId));
+                return _clans[index].clan;
             }
+            ClanInfo info = new()
+            {
+                clan = Clans?.Call("GetClanOf", playerId) as string ?? string.Empty,
+                time = Time.time,
+                userid = playerId,
+            };
+            _clans.Add(info);
+            if (_clanCo == null)
+            {
+                _clanCo = ServerMgr.Instance.StartCoroutine(ClanCo());
+            }
+            return info.clan;
+        }
 
-            return clan;
+        public class ClanInfo
+        {
+            public string clan;
+            public float time;
+            public ulong userid;
+        }
+
+        private IEnumerator ClanCo()
+        {
+            var instruction = CoroutineEx.waitForSeconds(1f);
+            while (_clans.Count > 0)
+            {
+                yield return instruction;
+                for (int i = _clans.Count - 1; i >= 0; i--)
+                {
+                    if (Time.time > _clans[i].time)
+                    {
+                        _clans.RemoveAt(i);
+                    }
+                }
+            }
+            _clanCo = null;
         }
 
         private void SetupClanTeamColors()
@@ -3748,6 +3944,7 @@ namespace Oxide.Plugins
                     data.Active.Remove(player.UserIDString);
                     UnityEngine.Object.Destroy(x);
                     _radars.Remove(x);
+                    _voices.Remove(x.userid);
                     return true;
                 }
             }
@@ -3790,9 +3987,21 @@ namespace Oxide.Plugins
             }
         }
 
+        protected new static void Puts(string format, params object[] args)
+        {
+            if (!string.IsNullOrEmpty(format))
+            {
+                Interface.Oxide.LogInfo("[{0}] {1}", "AdminRadar", (args.Length != 0) ? string.Format(format, args) : format);
+            }
+        }
+
         private static Color __(string value)
         {
-            return ColorUtility.TryParseHtmlString(value.StartsWith("#") ? value : $"#{value}", out Color color) ? color : Color.white;
+            if (ColorUtility.TryParseHtmlString(value.StartsWith('#') ? value : $"#{value}", out Color color))
+            {
+                return color;
+            }
+            return Color.white;
         }
 
         private string StripTags(string value)
@@ -4257,7 +4466,7 @@ namespace Oxide.Plugins
 
         private void AdminRadarDiscordMessage(string playerName, string playerId, bool state, Vector3 position)
         {
-            if (isUnloading || DiscordMessages == null)
+            if (isUnloading)
             {
                 return;
             }
@@ -4269,18 +4478,40 @@ namespace Oxide.Plugins
             var steam = $"[{playerName}](https://steamcommunity.com/profiles/{playerId})";
             var server = $"steam://connect/{ConVar.Server.ip}:{ConVar.Server.port}";
 
-            object fields = new[]
+            var embed = new
             {
-                new { name = config.Discord.Player, value = steam, inline = true },
-                new { name = config.Discord.Message, value = text, inline = false },
-                new { name = config.Discord.Server, value = server, inline = false },
-                new { name = config.Discord.Location, value = grid, inline = false }
+                embeds = new[]
+                {
+                    new
+                    {
+                        title = config.Discord.Title,
+                        fields = new[]
+                        {
+                            new { name = config.Discord.Player, value = steam, inline = true },
+                            new { name = config.Discord.Message, value = text, inline = false },
+                            new { name = config.Discord.Server, value = server, inline = false },
+                            new { name = config.Discord.Location, value = grid, inline = false }
+                        },
+                        color = config.Discord.Color
+                    }
+                }
             };
+
+            string json = JsonConvert.SerializeObject(embed);
 
             LogToFile("toggles", message, this, false);
             RCon.Broadcast(RCon.LogType.Chat, chatEntry);
-            Interface.CallHook("API_SendFancyMessage", config.Discord.Webhook, config.Discord.Title, config.Discord.Color, JsonConvert.SerializeObject(fields), null, this);
+
+            webrequest.Enqueue(config.Discord.Webhook, json, (code, response) =>
+            {
+                if (code != 200 && code != 204)
+                {
+                    Puts($"Failed to send message to Discord. HTTP Code: {code}, Response: {response}, Payload: {json}");
+                }
+            }, this, Core.Libraries.RequestMethod.POST, headers);
         }
+
+        private Dictionary<string, string> headers = new() { { "Content-Type", "application/json" } };
 
         private static List<string> ItemExceptions
         {
@@ -4350,23 +4581,37 @@ namespace Oxide.Plugins
                 ["Help9"] = "<color=#FFA500>/{0} drops</color> - Show all dropped items within {1}m.",
                 ["NoActiveRadars"] = "No one is using Radar at the moment.",
                 ["ActiveRadars"] = "Active radar users: {0}",
+                ["Airdrop"] = "Airdrop",
                 ["All"] = "All",
-                ["Bags"] = "Bags",
+                ["Bag"] = "Bag",
+                ["Bear"] = "Bear",
+                ["Boat"] = "Boat",
+                ["Boar"] = "Boar",
                 ["Box"] = "Box",
-                ["Collectibles"] = "Collectibles",
+                ["Bradley"] = "Bradley",
+                ["CCTV"] = "CCTV",
+                ["CH47"] = "CH47",
+                ["Car"] = "Car",
+                ["CargoPlane"] = "CargoPlane",
+                ["CargoShip"] = "CargoShip",
+                ["Chicken"] = "Chicken",
+                ["Col"] = "Col",
                 ["Dead"] = "Dead",
+                ["Heli"] = "Heli",
+                ["Horse"] = "Horse",
                 ["Loot"] = "Loot",
+                ["Mini"] = "Mini",
+                ["Npc"] = "Npc",
                 ["Ore"] = "Ore",
-                ["Sleepers"] = "Sleepers",
+                ["RHIB"] = "RHIB",
+                ["Sleeper"] = "Sleeper",
+                ["Stag"] = "Stag",
                 ["Stash"] = "Stash",
                 ["TC"] = "TC",
-                ["Turrets"] = "Turrets",
-                ["Bear"] = "Bear",
-                ["Boar"] = "Boar",
-                ["Chicken"] = "Chicken",
+                ["TCArrow"] = "TCArrow",
+                ["Trap"] = "Trap",
+                ["Turret"] = "Turret",
                 ["Wolf"] = "Wolf",
-                ["Stag"] = "Stag",
-                ["Horse"] = "Horse",
                 ["My Base"] = "My Base",
                 ["scarecrow"] = "scarecrow",
                 ["murderer"] = "murderer",
@@ -4403,7 +4648,118 @@ namespace Oxide.Plugins
                 ["TB"] = "TB",
                 ["RB"] = "RB",
                 ["MLRS"] = "MLRS",
+                ["H"] = "H",
+                ["B"] = "B",
+                ["travellingvendor"] = "travelvendor",
+                ["snake.entity"] = "snake",
+                ["crocodile"] = "crocodile",
+                ["panther"] = "panther",
+                ["tiger"] = "tiger",
             }, this, "en");
+
+            lang.RegisterMessages(new()
+            {
+                ["NotAllowed"] = "Vous n'êtes pas autorisé à utiliser cette commande.",
+                ["PreviousFilter"] = "Pour utiliser votre filtre précédent, tapez <color=#FFA500>/{0} f</color>",
+                ["Activated"] = "ESP activé - Rafraîchissement toutes les {0}s - Distance de {1}m. Utilisez <color=#FFA500>/{2} help</color> pour l'aide.",
+                ["Deactivated"] = "ESP désactivé.",
+                ["Exception"] = "Outil ESP : Une erreur s'est produite. Veuillez vérifier la console du serveur.",
+                ["GUIShown"] = "L'interface graphique sera affichée",
+                ["GUIHidden"] = "L'interface graphique est maintenant masquée",
+                ["InvalidID"] = "{0} n'est pas un ID Steam valide. Entrée supprimée.",
+                ["BoxesAll"] = "Affichage de toutes les boîtes activé.",
+                ["BoxesOnlineOnly"] = "Affichage uniquement des boîtes des joueurs en ligne activé.",
+                ["Help1"] = "<color=#FFA500>Filtres disponibles</color> : {0}",
+                ["Help2"] = "<color=#FFA500>/{0} {1}</color> - Permet d'afficher uniquement les boîtes des joueurs en ligne avec le filtre <color=#FF0000>box</color>.",
+                ["Help3"] = "<color=#FFA500>/{0} {1}</color> - Active/Désactive l'interface utilisateur rapide",
+                ["Help5"] = "ex. : <color=#FFA500>/{0} 1 1000 box loot stash</color>",
+                ["Help6"] = "ex. : <color=#FFA500>/{0} 0.5 400 all</color>",
+                ["VisionOn"] = "Vous verrez maintenant où les joueurs regardent.",
+                ["VisionOff"] = "Vous ne verrez plus où les joueurs regardent.",
+                ["ExtendedPlayersOn"] = "Les informations étendues pour les joueurs sont maintenant activées.",
+                ["ExtendedPlayersOff"] = "Les informations étendues pour les joueurs sont maintenant désactivées.",
+                ["Help7"] = "<color=#FFA500>/{0} {1}</color> - Active/Désactive l'affichage de la direction des regards des joueurs.",
+                ["Help8"] = "<color=#FFA500>/{0} {1}</color> - Active/Désactive les informations étendues pour les joueurs.",
+                ["backpack"] = "sac à dos",
+                ["scientist"] = "scientifique",
+                ["Help9"] = "<color=#FFA500>/{0} drops</color> - Affiche tous les objets abandonnés dans un rayon de {1}m.",
+                ["NoActiveRadars"] = "Personne n'utilise le Radar pour le moment.",
+                ["ActiveRadars"] = "Utilisateurs actifs du radar : {0}",
+                ["Airdrop"] = "Airdrop",
+                ["All"] = "Tous",
+                ["Bag"] = "Sacs",
+                ["Bear"] = "Ours",
+                ["Boat"] = "Bateau",
+                ["Boar"] = "Sanglier",
+                ["Box"] = "Boîtes",
+                ["Bradley"] = "Bradley",
+                ["CCTV"] = "CCTV",
+                ["CH47"] = "CH47",
+                ["Car"] = "Voiture",
+                ["CargoPlane"] = "Avion cargo",
+                ["CargoShip"] = "Navire cargo",
+                ["Chicken"] = "Poulet",
+                ["Col"] = "Col",
+                ["Dead"] = "Morts",
+                ["Heli"] = "Hélico",
+                ["Horse"] = "Cheval",
+                ["Loot"] = "Butin",
+                ["Mini"] = "Mini",
+                ["Npc"] = "PNJ",
+                ["Ore"] = "Minerai",
+                ["RHIB"] = "RHIB",
+                ["Sleeper"] = "Dormeurs",
+                ["Stag"] = "Cerf",
+                ["Stash"] = "Cachette",
+                ["TC"] = "CT",
+                ["TCArrow"] = "TCArrow",
+                ["Trap"] = "Piège",
+                ["Turret"] = "Tourelles",
+                ["Wolf"] = "Loup",
+                ["My Base"] = "Ma base",
+                ["scarecrow"] = "épouvantail",
+                ["murderer"] = "meurtrier",
+                ["WaitCooldown"] = "Vous devez attendre {0} secondes avant d'utiliser cette commande à nouveau.",
+                ["missionprovider_stables_a"] = "missions",
+                ["missionprovider_stables_b"] = "missions",
+                ["missionprovider_outpost_a"] = "missions",
+                ["missionprovider_outpost_b"] = "missions",
+                ["missionprovider_fishing_a"] = "missions",
+                ["missionprovider_fishing_b"] = "missions",
+                ["missionprovider_bandit_a"] = "missions",
+                ["missionprovider_bandit_b"] = "missions",
+                ["simpleshark"] = "requin",
+                ["stables_shopkeeper"] = "marchand",
+                ["npc_underwaterdweller"] = "habitant",
+                ["boat_shopkeeper"] = "marchand",
+                ["bandit_shopkeeper"] = "marchand",
+                ["outpost_shopkeeper"] = "marchand",
+                ["npc_bandit_guard"] = "garde",
+                ["bandit_conversationalist"] = "vendeur",
+                ["npc_tunneldweller"] = "habitant",
+                ["ProcessRequest"] = "Traitement de la demande ; cela prendra quelques secondes...",
+                ["ProcessRequestFinished"] = "{0} entités ont été trouvées.",
+                ["Radar UI Help"] = "Vous pouvez basculer le bouton de déplacement/réinitialiser l'interface utilisateur avec : {0}",
+                ["AT"] = "AT",
+                ["bag"] = "sac",
+                ["LR300AR"] = "LR300",
+                ["AR"] = "AK47",
+                ["ARICE"] = "AK47",
+                ["M92P"] = "M92",
+                ["M39P"] = "M39",
+                ["STH"] = "STH",
+                ["SUB"] = "SUB",
+                ["TB"] = "TB",
+                ["RB"] = "RB",
+                ["MLRS"] = "MLRS",
+                ["H"] = "H",
+                ["B"] = "B",
+                ["travellingvendor"] = "marchand",
+                ["snake.entity"] = "serpent",
+                ["crocodile"] = "crocodile",
+                ["panther"] = "panthère",
+                ["tiger"] = "tigre",
+            }, this, "fr");
 
             lang.RegisterMessages(new()
             {
@@ -4433,23 +4789,37 @@ namespace Oxide.Plugins
                 ["Help9"] = "<color=#FFA500>/{0} drops</color> - Muestra todos los objetos caídos dentro de {1}m.",
                 ["NoActiveRadars"] = "Nadie está utilizando el Radar en este momento.",
                 ["ActiveRadars"] = "Usuarios de radar activos: {0}",
+                ["Airdrop"] = "Airdrop",
                 ["All"] = "Todos",
-                ["Bags"] = "Bolsas",
+                ["Bag"] = "Bolsa",
+                ["Bear"] = "Oso",
+                ["Boat"] = "Barco",
+                ["Boar"] = "Jabalí",
                 ["Box"] = "Caja",
-                ["Collectibles"] = "Objetos coleccionables",
-                ["Dead"] = "Muertos",
+                ["Bradley"] = "Bradley",
+                ["CCTV"] = "CCTV",
+                ["CH47"] = "CH47",
+                ["Car"] = "Coche",
+                ["CargoPlane"] = "Avión de carga",
+                ["CargoShip"] = "Barco de carga",
+                ["Chicken"] = "Pollo",
+                ["Col"] = "Col",
+                ["Dead"] = "Muerto",
+                ["Heli"] = "Helicóptero",
+                ["Horse"] = "Caballo",
                 ["Loot"] = "Botín",
-                ["Ore"] = "Minerales",
-                ["Sleepers"] = "Durmientes",
+                ["Mini"] = "Mini",
+                ["Npc"] = "Npc",
+                ["Ore"] = "Mineral",
+                ["RHIB"] = "RHIB",
+                ["Sleeper"] = "Durmiente",
+                ["Stag"] = "Ciervo",
                 ["Stash"] = "Escondite",
                 ["TC"] = "TC",
-                ["Turrets"] = "Torretas",
-                ["Bear"] = "Oso",
-                ["Boar"] = "Jabalí",
-                ["Chicken"] = "Pollo",
+                ["TCArrow"] = "Flecha de TC",
+                ["Trap"] = "Trampa",
+                ["Turret"] = "Torreta",
                 ["Wolf"] = "Lobo",
-                ["Stag"] = "Ciervo",
-                ["Horse"] = "Caballo",
                 ["My Base"] = "Mi Base",
                 ["scarecrow"] = "espantapájaros",
                 ["murderer"] = "asesino",
@@ -4486,6 +4856,13 @@ namespace Oxide.Plugins
                 ["TB"] = "TB",
                 ["RB"] = "RB",
                 ["MLRS"] = "MLRS",
+                ["H"] = "H",
+                ["B"] = "B",
+                ["travellingvendor"] = "vendedor",
+                ["snake.entity"] = "serpiente",
+                ["crocodile"] = "cocodrilo",
+                ["panther"] = "pantera",
+                ["tiger"] = "tigre",
             }, this, "es-ES");
 
             lang.RegisterMessages(new()
@@ -4516,23 +4893,37 @@ namespace Oxide.Plugins
                 ["Help9"] = "<color=#FFA500>/{0} drops</color> - Mostra todos os itens caídos dentro de {1}m.",
                 ["NoActiveRadars"] = "Ninguém está usando o radar no momento.",
                 ["ActiveRadars"] = "Usuários ativos do radar: {0}",
+                ["Airdrop"] = "Airdrop",
                 ["All"] = "Todos",
-                ["Bags"] = "Bolsas",
+                ["Bag"] = "Bolsa",
+                ["Bear"] = "Urso",
+                ["Boat"] = "Barco",
+                ["Boar"] = "Javali",
                 ["Box"] = "Caixa",
-                ["Collectibles"] = "Colecionáveis",
+                ["Bradley"] = "Bradley",
+                ["CCTV"] = "Câmera CCTV",
+                ["CH47"] = "CH47",
+                ["Car"] = "Carro",
+                ["CargoPlane"] = "Avião de carga",
+                ["CargoShip"] = "Navio de carga",
+                ["Chicken"] = "Galinha",
+                ["Col"] = "Col",
                 ["Dead"] = "Mortos",
-                ["Loot"] = "Loots",
+                ["Heli"] = "Helicóptero",
+                ["Horse"] = "Cavalo",
+                ["Loot"] = "Loot",
+                ["Mini"] = "Mini",
+                ["Npc"] = "Npc",
                 ["Ore"] = "Minério",
-                ["Sleepers"] = "Dormindo",
+                ["RHIB"] = "RHIB",
+                ["Sleeper"] = "Dormindo",
+                ["Stag"] = "Veado",
                 ["Stash"] = "Stash",
                 ["TC"] = "TC",
-                ["Turrets"] = "Turrets",
-                ["Bear"] = "Urso",
-                ["Boar"] = "Javali",
-                ["Chicken"] = "Galinha",
+                ["TCArrow"] = "Seta do TC",
+                ["Trap"] = "Armadilha",
+                ["Turret"] = "Sentinelas",
                 ["Wolf"] = "Lobo",
-                ["Stag"] = "Veado",
-                ["Horse"] = "Cavalo",
                 ["My Base"] = "Minha Base",
                 ["scarecrow"] = "espantalho",
                 ["murderer"] = "assassino",
@@ -4563,7 +4954,19 @@ namespace Oxide.Plugins
                 ["AR"] = "AK47",
                 ["ARICE"] = "AK47",
                 ["M92P"] = "M92",
-                ["M39P"] = "M39"
+                ["M39P"] = "M39",
+                ["STH"] = "STH",
+                ["SUB"] = "SUB",
+                ["TB"] = "TB",
+                ["RB"] = "RB",
+                ["MLRS"] = "MLRS",
+                ["H"] = "H",
+                ["B"] = "B",
+                ["travellingvendor"] = "vendedor",
+                ["snake.entity"] = "cobra",
+                ["crocodile"] = "crocodilo",
+                ["panther"] = "pantera",
+                ["tiger"] = "tigre",
             }, this, "pt-BR");
         }
 
@@ -4801,6 +5204,12 @@ namespace Oxide.Plugins
             [JsonProperty(PropertyName = "Boxes")]
             public float Box = 100;
 
+            [JsonProperty(PropertyName = "BradleyAPC")]
+            public float Bradley = 9999f;
+
+            [JsonProperty(PropertyName = "Cargo Plane")]
+            public float CargoPlane = 9999f;
+
             [JsonProperty(PropertyName = "Cars")]
             public float Cars = 500f;
 
@@ -4821,6 +5230,9 @@ namespace Oxide.Plugins
 
             [JsonProperty(PropertyName = "NPC Players")]
             public float NPC = 300;
+
+            [JsonProperty(PropertyName = "Patrol Helicopter")]
+            public float PatrolHeli = 9999f;
 
             [JsonProperty(PropertyName = "Resources (Ore)")]
             public float Ore = 200;
@@ -4857,8 +5269,10 @@ namespace Oxide.Plugins
                 switch (type)
                 {
                     case EntityType.Active: return Players;
+                    case EntityType.Bradley: return Bradley;
                     case EntityType.Sleeper: return Players;
                     case EntityType.Dead: return Corpse;
+                    case EntityType.CargoPlane: return CargoPlane;
                     case EntityType.Airdrop: return Airdrop;
                     case EntityType.Backpack: return Loot;
                     case EntityType.Boat: return Boat;
@@ -4867,6 +5281,7 @@ namespace Oxide.Plugins
                     case EntityType.CCTV: return CCTV;
                     case EntityType.Col: return Col;
                     case EntityType.Drop: return Drops;
+                    case EntityType.Heli: return PatrolHeli;
                     case EntityType.Loot: return Loot;
                     case EntityType.Mini: return MC;
                     case EntityType.MLRS: return MLRS;
@@ -4878,17 +5293,14 @@ namespace Oxide.Plugins
                     case EntityType.TCArrow: return TCArrows;
                     case EntityType.Trap: return Traps;
                     case EntityType.Turret: return Turret;
-                    case EntityType.Bradley:
-                    case EntityType.CargoPlane:
                     case EntityType.CargoShip:
                     case EntityType.CH47:
                     case EntityType.Limit:
                     default:
                         {
+                            if (entity is BaseNpc or BaseNPC2 or FarmableAnimal or WildlifeHazard) return Animal;
                             if (entity is VendingMachine) return VendingMachine;
                             if (type == EntityType.Box) return Box;
-                            if (entity is BaseNpc) return Animal;
-                            if (entity is BaseNPC2) return Animal;
                             if (type == EntityType.Npc) return NPC;
                             return 9999f;
                         }
@@ -4923,7 +5335,7 @@ namespace Oxide.Plugins
             public bool Loot = true;
 
             [JsonProperty(PropertyName = "NPC")]
-            public bool NPCPlayer = true;
+            public bool NPC = true;
 
             [JsonProperty(PropertyName = "Ore")]
             public bool Ore = true;
@@ -4944,7 +5356,7 @@ namespace Oxide.Plugins
         public class ConfigurationAdditionalTracking
         {
             [JsonProperty(PropertyName = "Backpacks Plugin")]
-            public bool BackpackPlugin { get; set; }
+            public bool BackpackPlugin;
 
             [JsonProperty(PropertyName = "Boats")]
             public bool Boats;
@@ -5140,7 +5552,7 @@ namespace Oxide.Plugins
                 switch (type)
                 {
                     case EntityType.Active: return Online;
-                    case EntityType.Airdrop: return Box;
+                    case EntityType.Airdrop: return AD;
                     case EntityType.Backpack: return Backpack;
                     case EntityType.Bag: return Bag;
                     case EntityType.Boat: return Boat;
@@ -5314,6 +5726,8 @@ namespace Oxide.Plugins
 
             [JsonProperty(PropertyName = "Detection Radius")]
             public float Distance = 30f;
+
+            internal float SqrDistance => Distance * Distance;
         }
 
         public class ConfigurationDiscord
@@ -5382,40 +5796,46 @@ namespace Oxide.Plugins
         public class Configuration
         {
             [JsonProperty(PropertyName = "Core Tracking")]
-            public ConfigurationCoreTracking Core { get; set; } = new();
+            public ConfigurationCoreTracking Core = new();
 
             [JsonProperty(PropertyName = "Additional Tracking")]
-            public ConfigurationAdditionalTracking Additional { get; set; } = new();
+            public ConfigurationAdditionalTracking Additional = new();
 
             [JsonProperty(PropertyName = "Color-Hex Codes")]
-            public ConfigurationHex Hex { get; set; } = new();
+            public ConfigurationHex Hex = new();
 
             [JsonProperty(PropertyName = "DiscordMessages")]
-            public ConfigurationDiscord Discord { get; set; } = new();
+            public ConfigurationDiscord Discord = new();
 
             [JsonProperty(PropertyName = "Drawing Distances")]
-            public ConfigurationDrawDistances Distance { get; set; } = new();
+            public ConfigurationDrawDistances Distance = new();
 
             [JsonProperty(PropertyName = "Drawing Methods")]
-            public ConfigurationDrawMethods Methods { get; set; } = new();
+            public ConfigurationDrawMethods Methods = new();
 
             [JsonProperty(PropertyName = "Group Limit")]
-            public ConfigurationLimits Limit { get; set; } = new();
+            public ConfigurationLimits Limit = new();
 
             [JsonProperty(PropertyName = "GUI")]
-            public ConfigurationGUI GUI { get; set; } = new();
+            public ConfigurationGUI GUI = new();
 
             [JsonProperty(PropertyName = "Options")]
-            public ConfigurationOptions Options { get; set; } = new();
+            public ConfigurationOptions Options = new();
 
             [JsonProperty(PropertyName = "Settings")]
-            public ConfigurationSettings Settings { get; set; } = new();
+            public ConfigurationSettings Settings = new();
 
             [JsonProperty(PropertyName = "Track Admin Status")]
-            public ConfigurationTrack Track { get; set; } = new();
+            public ConfigurationTrack Track = new();
 
             [JsonProperty(PropertyName = "Voice Detection")]
-            public ConfigurationVoiceDetection Voice { get; set; } = new();
+            public ConfigurationVoiceDetection Voice = new();
+
+            [JsonProperty(PropertyName = "Bypass", ObjectCreationHandling = ObjectCreationHandling.Replace)]
+            public List<string> Bypass = new();
+
+            [JsonProperty(PropertyName = "Bypass OVerride", ObjectCreationHandling = ObjectCreationHandling.Replace)]
+            public List<string> BypassOverride = new();
         }
 
         protected override void LoadConfig()
@@ -5491,10 +5911,8 @@ namespace Oxide.Plugins
             return args.Length > 0 ? string.Format(lang.GetMessage(key, this, id), args) : lang.GetMessage(key, this, id);
         }
 
-        private static string R(string source)
-        {
-            return source.Contains(">") ? Regex.Replace(source, "<.*?>", string.Empty) : source;
-        }
+        public Regex TagRegex = new("<.*?>", RegexOptions.Compiled);
+        public string R(string source) => source.Contains('>') ? TagRegex.Replace(source, string.Empty) : source;
 
         private void Message(BasePlayer target, string key, params object[] args)
         {

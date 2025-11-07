@@ -18,14 +18,9 @@ using System.Text.RegularExpressions;
 using UnityEngine;
 using static Oxide.Plugins.AdminRadarExtensionMethods.ExtensionMethods;
 
-/*
-todo: add drones
-
-*/
-
 namespace Oxide.Plugins
 {
-    [Info("Admin Radar", "nivex", "5.4.1")]
+    [Info("Admin Radar", "nivex", "5.4.2")]
     [Description("Radar tool for Admins and Developers.")]
     internal class AdminRadar : RustPlugin
     {
@@ -228,7 +223,7 @@ namespace Oxide.Plugins
                 {
                     return true;
                 }
-                if ((config.Additional.CCTV || config.GUI.CCTV) && Add_Internal<CCTV_RC, EntityInfo>(CCTV, entity, EntityType.CCTV))
+                if ((config.Additional.CCTV || config.GUI.CCTV) && (Add_Internal<CCTV_RC, EntityInfo>(CCTV, entity, EntityType.CCTV) || Add_Internal<Drone, EntityInfo>(CCTV, entity, EntityType.CCTV)))
                 {
                     return true;
                 }
@@ -400,7 +395,9 @@ namespace Oxide.Plugins
                             || entity.ShortPrefabName.Contains("hackable", CompareOptions.IgnoreCase)
                             || entity.ShortPrefabName.Contains("oil", CompareOptions.IgnoreCase)
                             || entity.ShortPrefabName.Contains("vehicle_parts")
-                            || entity.ShortPrefabName.Contains("foodbox");
+                            || entity.ShortPrefabName.Contains("foodbox")
+                            || entity.ShortPrefabName == "krieg_storage_horizontal"
+                            || entity.ShortPrefabName == "krieg_storage_vertical";
                 }
                 return false;
             }
@@ -546,7 +543,22 @@ namespace Oxide.Plugins
 
         private class Radar : FacepunchBehaviour
         {
-            private static Func<char, bool> abbr = c => char.IsUpper(c) || char.IsDigit(c);
+            private string abbr(string s)
+            {
+                if (string.IsNullOrEmpty(s) || s.Length > 256) return s;
+
+                Span<char> buf = stackalloc char[s.Length];
+                int n = 0;
+
+                for (int i = 0; i < s.Length; i++)
+                {
+                    char c = s[i];
+                    if ((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9'))
+                        buf[n++] = c;
+                }
+
+                return new string(buf.Slice(0, n));
+            }
 
             public class DataObject : Pool.IPooled
             {
@@ -1098,6 +1110,10 @@ namespace Oxide.Plugins
                     {
                         continue;
                     }
+                    if (cobj.ei.type == EntityType.Ore && OreWhitelist.Count > 0 && !IsOreWhitelisted(cobj.ei))
+                    {
+                        continue;
+                    }
                     cflag = DrawFlags.Arrow;
                     if (cobj.HasFlag(DrawFlags.Arrow))
                     {
@@ -1278,7 +1294,8 @@ namespace Oxide.Plugins
                 var sb = StringBuilderCache.Acquire();
                 foreach (Item item in itemList.Take(num))
                 {
-                    sb.Append(instance.m(config.Options.Abbr ? string.Concat(item.info.displayName.english.Where(abbr)) : item.info.displayName.english, userid)).Append($": {item.amount}, ");
+                    if (item == null || item.info == null) continue;
+                    sb.Append(instance.m(config.Options.Abbr ? abbr(item.info.displayName.english) : item.info.displayName.english, userid)).Append($": {item.amount}, ");
                 }
                 sb.Length -= 2;
                 return $"({StringBuilderCache.GetStringAndRelease(sb)}) ({itemList.Count})";
@@ -1311,7 +1328,7 @@ namespace Oxide.Plugins
 
                 if (player.IsSpectating())
                 {
-                    var target = player.GetParentEntity() as BasePlayer;
+                    var target = player.spectatingTarget;
 
                     if (target != null)
                     {
@@ -1559,12 +1576,15 @@ namespace Oxide.Plugins
                 return __(config.Hex.Online);
             }
 
+            public float UserDefinedHeightIncrease;
             private void DrawAppendedText(BasePlayer target, Vector3 a, Vector3 offset, Color color)
             {
                 if (target.IsSpectating())
                 {
                     offset += Vector3.up;
                 }
+                offset.y += config.Settings.IncreasedHeight;
+                offset.y += UserDefinedHeightIncrease;
                 var sb = StringBuilderCache.Acquire();
                 if (Extended)
                 {
@@ -1572,13 +1592,14 @@ namespace Oxide.Plugins
 
                     if (item != null)
                     {
-                        BuildItemString(sb, item);
+                        if (item?.info != null) BuildItemString(sb, item);
 
                         if (item.contents?.itemList?.Count > 0)
                         {
                             sb.Append(" (");
                             foreach (var con in item.contents.itemList)
                             {
+                                if (con == null || con.info == null) continue;
                                 BuildItemString(sb, con);
                                 sb.Append('|');
                             }
@@ -1639,15 +1660,7 @@ namespace Oxide.Plugins
             {
                 if (config.Options.Abbr)
                 {
-                    var sb2 = StringBuilderCache.Acquire();
-                    foreach (char c in item.info.displayName.english)
-                    {
-                        if (abbr(c))
-                        {
-                            sb2.Append(c);
-                        }
-                    }
-                    sb.Append(instance.m(StringBuilderCache.GetStringAndRelease(sb2), userid));
+                    sb.Append(instance.m(abbr(item.info.displayName.english), userid));
                 }
                 else
                 {
@@ -2490,6 +2503,21 @@ namespace Oxide.Plugins
                 }
             }
 
+            public HashSet<string> OreWhitelist = new(StringComparer.OrdinalIgnoreCase);
+
+            public bool IsOreWhitelisted(EntityInfo ei)
+            {
+                if (ei.entity == null) return false;
+                foreach (var ore in OreWhitelist)
+                {
+                    if (ei.entity.ShortPrefabName.StartsWith(ore))
+                    {
+                        return true;
+                    }
+                }
+                return false;
+            }
+
             private void CacheOre(EntityInfo ei)
             {
                 try
@@ -2540,15 +2568,38 @@ namespace Oxide.Plugins
                     if (IsValid(ei, config.Distance.CCTV))
                     {
                         var obj = SetDataObject(ei);
+                        var drone = ei.entity as Drone;
                         var cctv = ei.entity as CCTV_RC;
-                        var name = instance.m("CCTV", userid);
+                        var name = instance.m(cctv != null ? "CCTV" : "Drone", userid);
 
-                        CacheText(obj, Color.magenta, new(0f, 0.3f, 0f), () =>
+                        if (cctv != null)
                         {
-                            ei.color = ei.entity.HasFlag(BaseEntity.Flags.Reserved5) ? Color.green : cctv.IsPowered() || cctv.IsStatic() ? Color.cyan : Color.red;
-                            ei.info = Format(name, $"<color={config.Hex.Dist}>{Distance(ei.from)}</color> {cctv.ViewerCount} {cctv.rcIdentifier}");
-                        });
-
+                            CacheText(obj, Color.magenta, new(0f, 0.3f, 0f), () =>
+                            {
+                                if (cctv == null) return;
+                                ei.color = ei.entity.HasFlag(BaseEntity.Flags.Reserved5) ? Color.green : cctv.IsPowered() || cctv.IsStatic() ? Color.cyan : Color.red;
+                                ei.info = Format(name, $"<color={config.Hex.Dist}>{Distance(ei.from)}</color> {cctv.ViewerCount} {cctv.rcIdentifier}");
+                            });
+                        }
+                        else if (drone != null)
+                        {
+                            CacheText(obj,Color.magenta, new(0f, 0.3f, 0f), () =>
+                            {
+                                if (drone == null) return;
+                                ei.color = config.Hex.Drone.Get(drone);
+                                if (config.Hex.Drone.ShowItem && drone.storageDrop.IsValid(serverside: true))
+                                {
+                                    Item item = drone.storageDrop.Get(serverside: true)?.inventory?.GetSlot(0);
+                                    if (item?.info != null) 
+                                    {
+                                        string itemname = instance.m(config.Hex.Drone.Abbr ? abbr(item.info.displayName.english) : item.info.displayName.english, userid);
+                                        ei.info = Format(name, $"<color={config.Hex.Dist}>{Distance(ei.from)}</color> {drone.ViewerCount} {drone.rcIdentifier} ({itemname})");
+                                        return;
+                                    }
+                                }
+                                ei.info = Format(name, $"<color={config.Hex.Dist}>{Distance(ei.from)}</color> {drone.ViewerCount} {drone.rcIdentifier}");
+                            });
+                        }
                         CacheBox(obj, Color.magenta, Vector3.zero, 0.25f);
                     }
 
@@ -2806,6 +2857,7 @@ namespace Oxide.Plugins
 
             if (config.Additional.CCTV)
             {
+                yield return CreateCoroutine(AddElementsToCache<Drone>(_coroutineTimer, cache.CCTV, EntityType.CCTV));
                 yield return CreateCoroutine(AddElementsToCache<CCTV_RC>(_coroutineTimer, cache.CCTV, EntityType.CCTV));
                 cached += cache.CCTV.Count;
             }
@@ -2903,7 +2955,6 @@ namespace Oxide.Plugins
             {
                 yield return CreateCoroutine(AddElementsToCache<Minicopter>(_coroutineTimer, cache.MiniCopter, EntityType.Mini));
                 yield return CreateCoroutine(AddElementsToCache<AttackHelicopter>(_coroutineTimer, cache.MiniCopter, EntityType.Mini));
-                yield return CreateCoroutine(AddElementsToCache<Drone>(_coroutineTimer, cache.MiniCopter, EntityType.Mini));
                 cached += cache.MiniCopter.Count;
             }
 
@@ -3297,6 +3348,18 @@ namespace Oxide.Plugins
             {
                 switch (args[0])
                 {
+                    case "recolor":
+                        {
+                            SetupClanTeamColors();
+                            return;
+                        }
+                    case "infopos":
+                        {
+                            float h = args.Length == 2 ? float.TryParse(args[1], out var f) ? f : 0 : 0;
+                            var r = _radars.Find(x => x.player == player);
+                            if (r != null) r.UserDefinedHeightIncrease = h;
+                        }
+                        return;
                     case "move":
                         {
                             var offsets = GetOffsets(player);
@@ -3457,6 +3520,18 @@ namespace Oxide.Plugins
                 radar = player.gameObject.AddComponent<Radar>();
 
                 radar.Init(this);
+            }
+
+            radar.OreWhitelist.Clear();
+
+            int i = Array.FindIndex(args, a => string.Equals(a, "ore", StringComparison.OrdinalIgnoreCase));
+            if (i >= 0 && ++i < args.Length)
+            {
+                radar.OreWhitelist.UnionWith(args[i..]);
+            }
+            else if (!config.Core.OreWhitelist.IsNullOrEmpty())
+            {
+                radar.OreWhitelist.UnionWith(config.Core.OreWhitelist);
             }
 
             float invokeTime, maxDistance;
@@ -4597,6 +4672,7 @@ namespace Oxide.Plugins
                 ["Chicken"] = "Chicken",
                 ["Col"] = "Col",
                 ["Dead"] = "Dead",
+                ["Drone"] = "Drone",
                 ["Heli"] = "Heli",
                 ["Horse"] = "Horse",
                 ["Loot"] = "Loot",
@@ -4609,6 +4685,7 @@ namespace Oxide.Plugins
                 ["Stash"] = "Stash",
                 ["TC"] = "TC",
                 ["TCArrow"] = "TCArrow",
+                ["TEC"] = "C4",
                 ["Trap"] = "Trap",
                 ["Turret"] = "Turret",
                 ["Wolf"] = "Wolf",
@@ -4701,6 +4778,7 @@ namespace Oxide.Plugins
                 ["Chicken"] = "Poulet",
                 ["Col"] = "Col",
                 ["Dead"] = "Morts",
+                ["Drone"] = "Drone",
                 ["Heli"] = "Hélico",
                 ["Horse"] = "Cheval",
                 ["Loot"] = "Butin",
@@ -4713,6 +4791,7 @@ namespace Oxide.Plugins
                 ["Stash"] = "Cachette",
                 ["TC"] = "CT",
                 ["TCArrow"] = "TCArrow",
+                ["TEC"] = "C4",
                 ["Trap"] = "Piège",
                 ["Turret"] = "Tourelles",
                 ["Wolf"] = "Loup",
@@ -4805,6 +4884,7 @@ namespace Oxide.Plugins
                 ["Chicken"] = "Pollo",
                 ["Col"] = "Col",
                 ["Dead"] = "Muerto",
+                ["Drone"] = "Drone",
                 ["Heli"] = "Helicóptero",
                 ["Horse"] = "Caballo",
                 ["Loot"] = "Botín",
@@ -4817,6 +4897,7 @@ namespace Oxide.Plugins
                 ["Stash"] = "Escondite",
                 ["TC"] = "TC",
                 ["TCArrow"] = "Flecha de TC",
+                ["TEC"] = "C4",
                 ["Trap"] = "Trampa",
                 ["Turret"] = "Torreta",
                 ["Wolf"] = "Lobo",
@@ -4909,6 +4990,7 @@ namespace Oxide.Plugins
                 ["Chicken"] = "Galinha",
                 ["Col"] = "Col",
                 ["Dead"] = "Mortos",
+                ["Drone"] = "Drone",
                 ["Heli"] = "Helicóptero",
                 ["Horse"] = "Cavalo",
                 ["Loot"] = "Loot",
@@ -4921,6 +5003,7 @@ namespace Oxide.Plugins
                 ["Stash"] = "Stash",
                 ["TC"] = "TC",
                 ["TCArrow"] = "Seta do TC",
+                ["TEC"] = "C4",
                 ["Trap"] = "Armadilha",
                 ["Turret"] = "Sentinelas",
                 ["Wolf"] = "Lobo",
@@ -5035,6 +5118,9 @@ namespace Oxide.Plugins
 
             [JsonProperty(PropertyName = "Show Radar Activated/Deactivated Messages")]
             public bool ShowToggle = true;
+
+            [JsonProperty(PropertyName = "Increase Height Of Text Above Player")]
+            public float IncreasedHeight;
 
             [JsonProperty(PropertyName = "Player Name Text Size")]
             public int PlayerNameSize = 24;
@@ -5340,6 +5426,9 @@ namespace Oxide.Plugins
             [JsonProperty(PropertyName = "Ore")]
             public bool Ore = true;
 
+            [JsonProperty(PropertyName = "Ore Whitelist", ObjectCreationHandling = ObjectCreationHandling.Replace)]
+            public List<string> OreWhitelist = new();
+
             [JsonProperty(PropertyName = "Stash")]
             public bool Stash = true;
 
@@ -5422,8 +5511,109 @@ namespace Oxide.Plugins
             }
         }
 
+        public class DroneHex
+        {
+            [JsonProperty(PropertyName = "Hostile: Thrown")]
+            public string ThrownHostile = "#ff0000"; // Red
+
+            [JsonProperty(PropertyName = "Hostile score threshold (Thrown)")]
+            public float HostileScoreThrown = 5f;
+
+            [JsonProperty(PropertyName = "Hostile: Other")]
+            public string ScoredHostile = "#ff0000"; // Red
+
+            [JsonProperty(PropertyName = "Hostile score threshold (Other)")]
+            public float HostileScoreOther = 7f;
+
+            [JsonProperty(PropertyName = "Player Controlled")]
+            public string Controlled = "#00ff00"; // Green
+
+            [JsonProperty(PropertyName = "Flying")]
+            public string Flying = "#0000ff"; // Blue
+
+            [JsonProperty(PropertyName = "Delivery or Unowned")]
+            public string DeliveryOrUnowned = "#ffff00"; // Yellow
+
+            [JsonProperty(PropertyName = "Owned by Player")]
+            public string Owned = "#ff00ff"; // Magenta
+
+            [JsonProperty(PropertyName = "Show Item Name")]
+            public bool ShowItem = true;
+
+            [JsonProperty(PropertyName = "Abbreviate Item Name")]
+            public bool Abbr = true;
+
+            public Color Get(Drone drone)
+            {
+                return drone switch
+                {
+                    _ when TryGetHostileColor(drone, out Color c) => c,
+                    _ when drone.IsBeingControlled && !string.IsNullOrWhiteSpace(Controlled) => Get(Controlled),
+                    _ when drone.HasFlag(BaseEntity.Flags.Reserved2) && !string.IsNullOrWhiteSpace(Flying) => Get(Flying),
+                    _ when (drone.OwnerID == 0 || drone is DeliveryDrone) && !string.IsNullOrWhiteSpace(DeliveryOrUnowned) => Get(DeliveryOrUnowned),
+                    _ => Get(Owned)
+                };
+            }
+
+            private bool TryGetHostileColor(Drone drone, out Color color)
+            {
+                if (!drone.storageDrop.IsValid(serverside: true))
+                {
+                    color = default;
+                    return false;
+                }
+
+                BaseEntity held = drone.storageDrop.Get(serverside: true)?.inventory?.GetSlot(0)?.GetHeldEntity();
+                if (held == null)
+                {
+                    color = default;
+                    return false;
+                }
+
+                if (HostileScoreThrown > 0f && held is ThrownWeapon tw)
+                {
+                    if (tw.hostileScore >= Mathf.Clamp(HostileScoreThrown, 0f, 20f)
+                        && !string.IsNullOrWhiteSpace(ThrownHostile))
+                    {
+                        color = Get(ThrownHostile);
+                        return true;
+                    }
+                    color = default;
+                    return false;
+                }
+
+                if (HostileScoreOther > 0f && held is AttackEntity ae
+                    && ae.hostileScore >= Mathf.Clamp(HostileScoreOther, 0f, 20f)
+                    && !string.IsNullOrWhiteSpace(ScoredHostile))
+                {
+                    color = Get(ScoredHostile);
+                    return true;
+                }
+
+                color = default;
+                return false;
+            }
+
+            private readonly Dictionary<string, Color> _cache = new(System.StringComparer.OrdinalIgnoreCase);
+
+            private Color Get(string hex)
+            {
+                if (string.IsNullOrWhiteSpace(hex))
+                    return Color.white;
+
+                if (_cache.TryGetValue(hex, out var c))
+                    return c;
+
+                _cache[hex] = c = __(hex);
+                return c;
+            }
+        }
+
         public class ConfigurationHex
         {
+            [JsonProperty(PropertyName = "Drones")]
+            public DroneHex Drone = new();
+
             [JsonProperty(PropertyName = "Player Arrows")]
             public string Arrows = "#000000";
 
@@ -5834,7 +6024,10 @@ namespace Oxide.Plugins
             [JsonProperty(PropertyName = "Bypass", ObjectCreationHandling = ObjectCreationHandling.Replace)]
             public List<string> Bypass = new();
 
-            [JsonProperty(PropertyName = "Bypass OVerride", ObjectCreationHandling = ObjectCreationHandling.Replace)]
+            [JsonProperty(PropertyName = "Bypass OVerride", NullValueHandling = NullValueHandling.Ignore)]
+            public List<string> _BypassOverride = null;
+
+            [JsonProperty(PropertyName = "Bypass Override", ObjectCreationHandling = ObjectCreationHandling.Replace)]
             public List<string> BypassOverride = new();
         }
 
@@ -5848,6 +6041,11 @@ namespace Oxide.Plugins
                 config = Config.ReadObject<Configuration>();
                 if (config == null) LoadDefaultConfig();
                 if (config.Settings.DropExceptions == null) config.Settings.DropExceptions = ItemExceptions;
+                if (config._BypassOverride != null)
+                {
+                    config.BypassOverride.AddRange(config._BypassOverride);
+                    config._BypassOverride = null;
+                }
                 canSaveConfig = true;
                 SaveConfig();
             }

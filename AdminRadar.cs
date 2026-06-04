@@ -1,4 +1,4 @@
-﻿//#define DEBUG
+﻿//#define ARDEBUG
 
 using Facepunch;
 using Newtonsoft.Json;
@@ -20,7 +20,7 @@ using static Oxide.Plugins.AdminRadarExtensionMethods.ExtensionMethods;
 
 namespace Oxide.Plugins
 {
-    [Info("Admin Radar", "nivex", "5.4.2")]
+    [Info("Admin Radar", "nivex", "5.4.3")]
     [Description("Radar tool for Admins and Developers.")]
     internal class AdminRadar : RustPlugin
     {
@@ -395,9 +395,7 @@ namespace Oxide.Plugins
                             || entity.ShortPrefabName.Contains("hackable", CompareOptions.IgnoreCase)
                             || entity.ShortPrefabName.Contains("oil", CompareOptions.IgnoreCase)
                             || entity.ShortPrefabName.Contains("vehicle_parts")
-                            || entity.ShortPrefabName.Contains("foodbox")
-                            || entity.ShortPrefabName == "krieg_storage_horizontal"
-                            || entity.ShortPrefabName == "krieg_storage_vertical";
+                            || entity.ShortPrefabName.Contains("foodbox");
                 }
                 return false;
             }
@@ -406,7 +404,7 @@ namespace Oxide.Plugins
             {
                 if (config.Core.Box)
                 {
-                    return config.Options.AdditionalBoxes.Exists(entity.ShortPrefabName.Contains);
+                    return config.Options.Boxes.Exists(entity.ShortPrefabName.Contains);
                 }
                 return false;
             }
@@ -443,7 +441,7 @@ namespace Oxide.Plugins
 
                 if (!_isRunning)
                 {
-#if DEBUG
+#if ARDEBUG
                     double milliseconds = Elapsed;
                     if (stopwatch.Elapsed.TotalMilliseconds > 2f * _maxDurationMs)
                     {
@@ -1136,7 +1134,7 @@ namespace Oxide.Plugins
 
             private void DrawVisionArrow(BasePlayer target, float dist)
             {
-                if (dist <= 150f && instance.data.Visions.Contains(userid) && Physics.Raycast(target.eyes.HeadRay(), out hit, Mathf.Infinity))
+                if (dist <= 150f && instance.IsVision(userid) && Physics.Raycast(target.eyes.HeadRay(), out hit, Mathf.Infinity))
                 {
                     DrawArrow(Color.red, target.eyes.position + new Vector3(0f, 0.115f, 0f), hit.point, 0.15f, true);
                 }
@@ -1633,10 +1631,11 @@ namespace Oxide.Plugins
                 {
                     clan = $" <color={clan}>C</color>";
                 }
-                if (instance._teamColors.TryGetValue(target.currentTeam, out var team) && !config.Settings.ApplySameColor)
+                if (target.currentTeam != 0 && instance._teamColors.TryGetValue(target.currentTeam, out var team) && !config.Settings.ApplySameColor)
                 {
                     team = $"<color={team}>T</color>";
                 }
+                else team = string.Empty;
                 if (config.Settings.ShowIdleTime)
                 {
                     var time = GetIdleTime(target);
@@ -1670,12 +1669,14 @@ namespace Oxide.Plugins
 
             private string GetCheats(BasePlayer target)
             {
+                if (!config.Track.Any) return string.Empty;
                 var sb = StringBuilderCache.Acquire();
-                if (config.Track.Radar && instance.IsRadar(target.UserIDString)) sb.Append(config.Track.RadarText).Append("|");
-                if (config.Track.God && target.IsGod()) sb.Append(config.Track.GodText).Append("|");
-                if (config.Track.GodPlugin && target.metabolism?.calories?.min == 500) sb.Append(config.Track.GodPluginText).Append("|");
-                if (config.Track.Vanish && target.limitNetworking) sb.Append(config.Track.VanishText).Append("|");
-                if (config.Track.NoClip && target.IsFlying) sb.Append(config.Track.NoClipText).Append("|");
+                if (config.Track.Radar && !string.IsNullOrWhiteSpace(config.Track.RadarText) && instance.IsRadar(target.UserIDString)) sb.Append(config.Track.RadarText).Append("|");
+                if (config.Track.Spectating && target.spectatingTarget != null && !string.IsNullOrWhiteSpace(config.Track.SpectatingText)) sb.Append(config.Track.SpectatingText).Append("|");
+                if (config.Track.God && !string.IsNullOrWhiteSpace(config.Track.GodText) && target.IsGod()) sb.Append(config.Track.GodText).Append("|");
+                if (config.Track.GodPlugin && !string.IsNullOrWhiteSpace(config.Track.GodPluginText) && target.metabolism?.calories?.min == 500) sb.Append(config.Track.GodPluginText).Append("|");
+                if (config.Track.Vanish && !string.IsNullOrWhiteSpace(config.Track.VanishText) && (target.limitNetworking || target.isInvisible)) sb.Append(config.Track.VanishText).Append("|");
+                if (config.Track.NoClip && !string.IsNullOrWhiteSpace(config.Track.NoClipText) && target.IsFlying) sb.Append(config.Track.NoClipText).Append("|");
                 if (sb.Length > 0) { sb.Length -= 1; sb.Insert(0, "(").Append(") "); }
                 return StringBuilderCache.GetStringAndRelease(sb);
             }
@@ -2583,14 +2584,14 @@ namespace Oxide.Plugins
                         }
                         else if (drone != null)
                         {
-                            CacheText(obj,Color.magenta, new(0f, 0.3f, 0f), () =>
+                            CacheText(obj, Color.magenta, new(0f, 0.3f, 0f), () =>
                             {
                                 if (drone == null) return;
                                 ei.color = config.Hex.Drone.Get(drone);
                                 if (config.Hex.Drone.ShowItem && drone.storageDrop.IsValid(serverside: true))
                                 {
                                     Item item = drone.storageDrop.Get(serverside: true)?.inventory?.GetSlot(0);
-                                    if (item?.info != null) 
+                                    if (item?.info != null)
                                     {
                                         string itemname = instance.m(config.Hex.Drone.Abbr ? abbr(item.info.displayName.english) : item.info.displayName.english, userid);
                                         ei.info = Format(name, $"<color={config.Hex.Dist}>{Distance(ei.from)}</color> {drone.ViewerCount} {drone.rcIdentifier} ({itemname})");
@@ -3021,7 +3022,7 @@ namespace Oxide.Plugins
                 yield return CreateCoroutine(AddElementsToCache<CargoPlane>(_coroutineTimer, cache.CargoPlanes, EntityType.CargoPlane, condition));
                 cached += cache.CargoPlanes.Count;
             }
-#if DEBUG
+#if ARDEBUG
             cache.Print();
 #else
             Puts("Cached {0}/{1} entities in {2} seconds!", cached, total, (DateTime.Now - tick).TotalSeconds);
@@ -3056,7 +3057,7 @@ namespace Oxide.Plugins
                 timer.ResetIfYielded();
             }
 
-#if DEBUG
+#if ARDEBUG
             Puts($"Start Remove {typeof(TType)}");
 #endif
             using var toRemove = DisposableList<NetworkableId>.Get();
@@ -3087,7 +3088,7 @@ namespace Oxide.Plugins
                 checks++;
             }
 
-#if DEBUG
+#if ARDEBUG
             Puts($"End Remove {typeof(TType)}");
 #endif
             //Puts("RemoveElementsFromList");
@@ -3102,7 +3103,7 @@ namespace Oxide.Plugins
                 timer.ResetIfYielded();
             }
 
-#if DEBUG
+#if ARDEBUG
             Puts($"Start Caching {typeof(TType)}");
 #endif
 
@@ -3139,7 +3140,7 @@ namespace Oxide.Plugins
                 checks++;
             }
 
-#if DEBUG
+#if ARDEBUG
             Puts($"End Caching {typeof(TType)}");
 #endif
             //Puts("AddElementsToCacheWithInfo");
@@ -3154,7 +3155,7 @@ namespace Oxide.Plugins
                 timer.ResetIfYielded();
             }
 
-#if DEBUG
+#if ARDEBUG
             Puts($"Start Caching {typeof(TLookFor)}");
 #endif
             using var toRemove = DisposableList<NetworkableId>.Get();
@@ -3190,7 +3191,7 @@ namespace Oxide.Plugins
                 checks++;
             }
 
-#if DEBUG
+#if ARDEBUG
             Puts($"End Caching {typeof(TLookFor)}");
 #endif
             //Puts("AddElementsToCache");
@@ -3210,11 +3211,11 @@ namespace Oxide.Plugins
 
             if (arg.Args.Contains(config.GUI.Arrow) || arg.Args.Contains("move"))
             {
-                ccmdMovePosition(player, "espgui", arg.Args);
+                ccmdMovePosition(player, "espgui", arg.Args.ToStringArray());
                 return;
             }
 
-            RadarCommandX(player, "espgui", arg.Args);
+            RadarCommandX(player, "espgui", arg.Args.ToStringArray());
         }
 
         private void ccmdMovePosition(BasePlayer player, string command, string[] args)
@@ -3315,11 +3316,6 @@ namespace Oxide.Plugins
             }
 
             RadarCommandY(player, command, args);
-        }
-
-        private void TurnRadarOn(BasePlayer player, string[] args)
-        {
-            RadarCommandY(player, radarCommand, args);
         }
 
         private void RadarCommandY(BasePlayer player, string command, string[] args)
@@ -3429,9 +3425,8 @@ namespace Oxide.Plugins
                         return;
                     case "vision":
                         {
-                            if (!data.Visions.Remove(player.UserIDString)) data.Visions.Add(player.UserIDString);
-
-                            Message(player, data.Visions.Contains(player.UserIDString) ? "VisionOn" : "VisionOff");
+                            SetVision(player, !IsVision(player));
+                            Message(player, IsVision(player) ? "VisionOn" : "VisionOff");
                         }
                         return;
                     case "ext":
@@ -3894,6 +3889,7 @@ namespace Oxide.Plugins
 
         private void OnTeamCreated(BasePlayer player, RelationshipManager.PlayerTeam team)
         {
+            if (team.teamID == 0) return;
             string hex = $"#{Core.Random.Range(0x1000000):X6}";
             _teamColors[team.teamID] = hex;
             Interface.CallHook("OnTeamCreatedColor", team.teamID, hex);
@@ -3992,7 +3988,7 @@ namespace Oxide.Plugins
         {
             foreach (var team in RelationshipManager.ServerInstance.teams)
             {
-                _teamColors[team.Key] = $"#{Core.Random.Range(0x1000000):X6}";
+                if (team.Key != 0) _teamColors[team.Key] = $"#{Core.Random.Range(0x1000000):X6}";
             }
 
             Interface.CallHook("OnTeamColorsInitialized", _teamColors);
@@ -4010,13 +4006,69 @@ namespace Oxide.Plugins
             Interface.CallHook("OnClanColorsInitialized", _clanColors);
         }
 
-        private bool DestroyRadar(BasePlayer player)
+        private bool SetVision(BasePlayer player, bool enabled)
+        {
+            if (player == null)
+            {
+                return false;
+            }
+
+            return SetVision(player.UserIDString, enabled);
+        }
+
+        private bool SetVision(string id, bool enabled)
+        {
+            bool isVision = IsVision(id);
+            if (!enabled && isVision)
+            {
+                data.Visions.Remove(id);
+                return true;
+            }
+            if (enabled && !isVision)
+            {
+                data.Visions.Add(id);
+                return true;
+            }
+            return false;
+        }
+
+        private bool SetRadar(string id, bool enabled, string[] args = null, BasePlayer player = null)
+        {
+            if (args == null)
+            {
+                args = Array.Empty<string>();
+            }
+            bool isRadar = IsRadar(id);
+            if (!enabled && isRadar)
+            {
+                return DestroyRadar(id);
+            }
+            if (enabled && !isRadar)
+            {
+                player ??= BasePlayer.Find(id);
+                if (player == null) return false;
+                RadarCommandY(player, radarCommand, args);
+                return true;
+            }
+            return false;
+        }
+
+        private bool SetRadar(BasePlayer player, bool enabled, string[] args = null)
+        {
+            if (player == null)
+            {
+                return false;
+            }
+            return SetRadar(player.UserIDString, enabled, args, player);
+        }
+
+        private bool DestroyRadar(string id)
         {
             foreach (var x in _radars)
             {
-                if (x.player == player)
+                if (x.userid == id)
                 {
-                    data.Active.Remove(player.UserIDString);
+                    data.Active.Remove(id);
                     UnityEngine.Object.Destroy(x);
                     _radars.Remove(x);
                     _voices.Remove(x.userid);
@@ -4026,9 +4078,25 @@ namespace Oxide.Plugins
             return false;
         }
 
+        private bool DestroyRadar(BasePlayer player)
+        {
+            if (player == null) return false;
+            return DestroyRadar(player.UserIDString);
+        }
+
         private bool IsRadar(string id)
         {
-            return _radars.Exists(radar => radar.userid == id) ? true : false;
+            return _radars.Exists(radar => radar.userid == id);
+        }
+
+        private bool IsVision(string id)
+        {
+            return data.Visions.Contains(id);
+        }
+
+        private bool IsVision(BasePlayer player)
+        {
+            return player != null && IsVision(player.UserIDString);
         }
 
         private void TryCacheByType(EntityType type, EntityInfo ei)
@@ -5152,8 +5220,25 @@ namespace Oxide.Plugins
 
         public class ConfigurationOptions
         {
-            [JsonProperty(PropertyName = "Additional Boxes", ObjectCreationHandling = ObjectCreationHandling.Replace)]
-            public List<string> AdditionalBoxes = new() { "storage_barrel", "vendingmachine.deployed", "woodbox_deployed", "box.wooden.large", "dropbox.deployed", "coffinstorage", "small_stash_deployed", "mailbox.deployed", "missionstash", "heli_crate" };
+            [JsonProperty(PropertyName = "Boxes", ObjectCreationHandling = ObjectCreationHandling.Replace)]
+            public List<string> Boxes = new()
+            {
+                "abyss_barrel",
+                "bamboo_barrel",
+                "box.wooden.large",
+                "coffinstorage",
+                "dropbox.deployed",
+                "heli_crate",
+                "krieg_storage",
+                "mailbox.deployed",
+                "medieval.box.wooden.large",
+                "missionstash",
+                "small_stash_deployed",
+                "storage_barrel",
+                "vendingmachine.deployed",
+                "wicker_barrel",
+                "woodbox_deployed"
+            };
 
             [JsonProperty(PropertyName = "Additional Traps", ObjectCreationHandling = ObjectCreationHandling.Replace)]
             public List<string> AdditionalTraps = new() { "barricade.metal", "barricade.stone", "barricade.wood", "barricade.woodwire", "spikes.floor", "guntrap", "sam_site_turret_deployed", "flameturret" };
@@ -5981,6 +6066,14 @@ namespace Oxide.Plugins
 
             [JsonProperty(PropertyName = "NOCLIP Text")]
             public string NoClipText = "<color=#FFFF00>F</color>";
+
+            [JsonProperty(PropertyName = "Spectating")]
+            public bool Spectating;
+
+            [JsonProperty(PropertyName = "Spectating Text")]
+            public string SpectatingText = "<color=#00FFFF>S</color>";
+
+            internal bool Any => Radar || God || GodPlugin || Vanish || NoClip || Spectating;
         }
 
         public class Configuration
@@ -6147,5 +6240,7 @@ namespace Oxide.Plugins.AdminRadarExtensionMethods
         public static void ResetToPool<K, V>(this Dictionary<K, V> obj) { if (obj == null) return; obj.Clear(); Pool.FreeUnmanaged(ref obj); }
         public static void ResetToPool<T>(this HashSet<T> obj) { if (obj == null) return; obj.Clear(); Pool.FreeUnmanaged(ref obj); }
         public static void ResetToPool<T>(this List<T> obj) { if (obj == null) return; obj.Clear(); Pool.FreeUnmanaged(ref obj); }
+        public static string[] ToStringArray(this string[] args) => args;
+        public static string[] ToStringArray(this StringView[] args) { if (args == null || args.Length == 0) return Array.Empty<string>(); string[] array = new string[args.Length]; for (int i = 0; i < args.Length; i++) array[i] = args[i].ToString(); return array; }
     }
 }

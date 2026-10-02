@@ -20,7 +20,7 @@ using static Oxide.Plugins.AdminRadarExtensionMethods.ExtensionMethods;
 
 namespace Oxide.Plugins
 {
-    [Info("Admin Radar", "nivex", "5.4.3")]
+    [Info("Admin Radar", "nivex", "5.4.4")]
     [Description("Radar tool for Admins and Developers.")]
     internal class AdminRadar : RustPlugin
     {
@@ -3773,7 +3773,7 @@ namespace Oxide.Plugins
             }
         }
 
-        private void OnPlayerVoice(BasePlayer player, byte[] data)
+        private void OnPlayerVoice(BasePlayer player, ArraySegment<byte> data)
         {
             if (player == null || player.IsDestroyed)
             {
